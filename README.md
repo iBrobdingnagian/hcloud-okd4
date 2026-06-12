@@ -95,10 +95,22 @@ It can be installed at either point:
   cluster is detected, pick "Monitoring" from the menu, or run
   `./deploy-okd.sh --monitoring --yes` non-interactively.
 
+Grafana ships with three provisioned cluster dashboards (read-only files
+generated from `grafana/gen-dashboards.py`; any JSON dropped into
+`grafana/dashboards/` is provisioned too):
+
+- **OKD / Cluster Overview** — node/pod/alert counts, cluster CPU/memory/
+  disk gauges, per-node usage and network, top pods, API server request
+  rate/latency/errors, etcd health (leader, DB size, commit latency), and
+  a firing-alerts table.
+- **OKD / Nodes** — per-node drill-down (CPU, load, memory, disk I/O,
+  network, filesystems) with a node selector.
+- **OKD / Workloads** — per-namespace pods, CPU/memory/network by pod,
+  restarts, PVC usage.
+
 Once enabled, metrics and alerts are in the web console under **Observe**,
-and Grafana is at `https://grafana.apps.<domain>` for custom dashboards
-(import any dashboard from grafana.com against the "OpenShift Prometheus"
-datasource).
+and Grafana is at `https://grafana.apps.<domain>` (you can also import any
+dashboard from grafana.com against the "OpenShift Prometheus" datasource).
 
 Notes:
 - `--yes` implies `--no-admin` (passwords can't be prompted non-interactively);

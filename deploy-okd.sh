@@ -292,6 +292,26 @@ datasources:
 DSEOF
   oc -n grafana create configmap grafana-datasources --from-file=datasources.yaml="$dstmp" \
     --dry-run=client -o yaml | oc apply -f -
+  # dashboards: every JSON in grafana/dashboards/ is provisioned read-only
+  # (regenerate them with: python3 grafana/gen-dashboards.py)
+  if [ -d grafana/dashboards ] && [ -n "$(ls grafana/dashboards/*.json 2>/dev/null)" ]; then
+    cat > "$dstmp" <<'DBPEOF'
+apiVersion: 1
+providers:
+- name: okd
+  orgId: 1
+  folder: ''
+  type: file
+  disableDeletion: false
+  updateIntervalSeconds: 30
+  options:
+    path: /var/lib/grafana/dashboards
+DBPEOF
+    oc -n grafana create configmap grafana-dashboard-provider \
+      --from-file=dashboards.yaml="$dstmp" --dry-run=client -o yaml | oc apply -f -
+    oc -n grafana create configmap grafana-dashboards \
+      --from-file=grafana/dashboards/ --dry-run=client -o yaml | oc apply -f -
+  fi
   rm -f "$dstmp"
   oc apply -f - <<GRAFANA
 apiVersion: apps/v1
@@ -339,12 +359,24 @@ spec:
           mountPath: /var/lib/grafana
         - name: datasources
           mountPath: /etc/grafana/provisioning/datasources
+        - name: dashboard-provider
+          mountPath: /etc/grafana/provisioning/dashboards
+        - name: dashboards
+          mountPath: /var/lib/grafana/dashboards
       volumes:
       - name: data
         emptyDir: {}
       - name: datasources
         configMap:
           name: grafana-datasources
+      - name: dashboard-provider
+        configMap:
+          name: grafana-dashboard-provider
+          optional: true
+      - name: dashboards
+        configMap:
+          name: grafana-dashboards
+          optional: true
 ---
 apiVersion: v1
 kind: Service
@@ -374,6 +406,8 @@ spec:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
 GRAFANA
+  # restart so config-only changes (datasource/dashboards) are picked up on re-runs
+  oc -n grafana rollout restart deploy/grafana >/dev/null
   oc -n grafana rollout status deploy/grafana --timeout=300s \
     || { echo "    Grafana did not become ready — check: oc -n grafana get pods"; return 1; }
   MONITORING_NOTE="$MONITORING_NOTE
