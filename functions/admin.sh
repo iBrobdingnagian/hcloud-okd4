@@ -4,8 +4,12 @@
 
 ADMIN_CREATED=""
 create_admin() {
-  command -v htpasswd >/dev/null \
-    || { echo "    htpasswd binary not found — manual steps are in the summary"; return 1; }
+  export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+  [ -f "$KUBECONFIG" ] || { echo "    no kubeconfig at $KUBECONFIG — cannot create the admin user"; return 1; }
+  if ! command -v htpasswd >/dev/null && ! command -v openssl >/dev/null; then
+    echo "    neither htpasswd nor openssl found — manual steps are in the summary"
+    return 1
+  fi
   local user pass pass2 attempt=0 tmp t lkc
   printf 'Admin username [admin]: '
   read -r user; user=${user:-admin}
@@ -18,7 +22,13 @@ create_admin() {
     echo "    empty or mismatched — try again"
   done
   tmp=$(mktemp -d)   # mktemp -d is 0700
-  htpasswd -c -B -b "$tmp/users.htpasswd" "$user" "$pass" >/dev/null 2>&1
+  if command -v htpasswd >/dev/null; then
+    htpasswd -c -B -b "$tmp/users.htpasswd" "$user" "$pass" >/dev/null 2>&1
+  else
+    # no htpasswd on this host: apr1 via openssl is a valid htpasswd format
+    # accepted by the OpenShift htpasswd identity provider
+    printf '%s:%s\n' "$user" "$(openssl passwd -apr1 "$pass")" > "$tmp/users.htpasswd"
+  fi
   oc create secret generic htpass-secret \
     --from-file=htpasswd="$tmp/users.htpasswd" -n openshift-config \
     --dry-run=client -o yaml | oc apply -f -

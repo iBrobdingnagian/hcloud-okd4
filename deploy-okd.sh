@@ -36,6 +36,8 @@ Usage: ./deploy-okd.sh [options]
   --release R       OKD line (4.16) or full tag (4.16.0-okd-scos.1)
   --rebuild-image   build the CoreOS snapshot even if one exists for this release
   --no-admin        skip the htpasswd admin step
+  --admin           create the htpasswd admin user on an already-running
+                    cluster (interactive; the password is prompted)
   --monitoring      configure monitoring & alerting (user-workload monitoring,
                     Alertmanager, Grafana dashboards) — only available when
                     at least one schedulable node has more than 12 GB RAM;
@@ -56,7 +58,7 @@ USAGE
 FLAG_REGION="" FLAG_MASTERS="" FLAG_WORKERS="" FLAG_MASTER_TYPE="" FLAG_WORKER_TYPE=""
 FLAG_DURATION="" FLAG_RELEASE="" REBUILD_IMAGE=0 NO_ADMIN=0 NO_AUTODESTROY=0 ASSUME_YES=0
 FLAG_PROFILE="" FLAG_LAB_TOPOLOGY="" FLAG_LAB_TIER="" FLAG_AUTODESTROY_AT="" FLAG_SCALE=0
-FLAG_MONITORING=0 ALERT_WEBHOOK=""
+FLAG_MONITORING=0 ALERT_WEBHOOK="" FLAG_ADMIN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --region)         FLAG_REGION=${2:?--region needs a value}; shift 2 ;;
@@ -72,6 +74,7 @@ while [ $# -gt 0 ]; do
     --release)        FLAG_RELEASE=${2:?--release needs a value}; shift 2 ;;
     --rebuild-image)  REBUILD_IMAGE=1; shift ;;
     --no-admin)       NO_ADMIN=1; shift ;;
+    --admin)          FLAG_ADMIN=1; shift ;;
     --monitoring)     FLAG_MONITORING=1; shift ;;
     --alert-webhook)  ALERT_WEBHOOK=${2:?--alert-webhook needs a URL}; FLAG_MONITORING=1; shift 2 ;;
     --no-autodestroy) NO_AUTODESTROY=1; shift ;;

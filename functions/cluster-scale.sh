@@ -16,6 +16,11 @@ handle_existing_cluster() {
     install_monitoring || exit 1
     log "Done: $MONITORING_NOTE"
     exit 0
+  elif [ "$FLAG_ADMIN" = 1 ]; then
+    [ "$ASSUME_YES" = 0 ] || err "--admin needs an interactive terminal (the password is prompted)"
+    create_admin || exit 1
+    log "Done: admin user '$ADMIN_CREATED' created"
+    exit 0
   elif [ "$ASSUME_YES" = 1 ]; then
     err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale / --monitoring"
   else
@@ -27,13 +32,17 @@ handle_existing_cluster() {
     else
       echo "  2) Monitoring — UNAVAILABLE (needs a node with >12 GB RAM, largest is ${MON_MAX_GB:-0} GB)"
     fi
-    echo "  3) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
-    printf 'Selection [3]: '
-    read -r SCSEL; SCSEL=${SCSEL:-3}
+    echo "  3) Admin — create htpasswd admin user (replaces kubeadmin)"
+    echo "  4) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
+    printf 'Selection [4]: '
+    read -r SCSEL; SCSEL=${SCSEL:-4}
     case "$SCSEL" in
       1) DO_SCALE=1 ;;
       2) install_monitoring || exit 1
          log "Done: $MONITORING_NOTE"
+         exit 0 ;;
+      3) create_admin || exit 1
+         log "Done: admin user '$ADMIN_CREATED' created"
          exit 0 ;;
     esac
   fi
