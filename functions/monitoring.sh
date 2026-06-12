@@ -154,25 +154,29 @@ datasources:
 DSEOF
   oc -n grafana create configmap grafana-datasources --from-file=datasources.yaml="$dstmp" \
     --dry-run=client -o yaml | oc apply -f -
-  # dashboards: every JSON in grafana/dashboards/ is provisioned read-only
-  # (regenerate them with: python3 grafana/gen-dashboards.py)
-  if [ -d grafana/dashboards ] && [ -n "$(ls grafana/dashboards/*.json 2>/dev/null)" ]; then
+  # dashboards: grafana/dashboards/<category>/*.json — each category becomes
+  # a Grafana folder (regenerate with: python3 grafana/gen-dashboards.py)
+  if [ -d grafana/dashboards ]; then
     cat > "$dstmp" <<'DBPEOF'
 apiVersion: 1
 providers:
-- name: okd
-  orgId: 1
-  folder: ''
-  type: file
-  disableDeletion: false
-  updateIntervalSeconds: 30
-  options:
-    path: /var/lib/grafana/dashboards
+- { name: cluster,       orgId: 1, folder: 'Cluster',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/cluster } }
+- { name: control-plane, orgId: 1, folder: 'Control Plane', type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/control-plane } }
+- { name: nodes,         orgId: 1, folder: 'Nodes',         type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/nodes } }
+- { name: workloads,     orgId: 1, folder: 'Workloads',     type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/workloads } }
+- { name: network,       orgId: 1, folder: 'Network',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/network } }
+- { name: storage,       orgId: 1, folder: 'Storage',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/storage } }
 DBPEOF
     oc -n grafana create configmap grafana-dashboard-provider \
       --from-file=dashboards.yaml="$dstmp" --dry-run=client -o yaml | oc apply -f -
-    oc -n grafana create configmap grafana-dashboards \
-      --from-file=grafana/dashboards/ --dry-run=client -o yaml | oc apply -f -
+    local cat
+    for cat in cluster control-plane nodes workloads network storage; do
+      [ -d "grafana/dashboards/$cat" ] || continue
+      oc -n grafana create configmap "grafana-dashboards-$cat" \
+        --from-file="grafana/dashboards/$cat/" --dry-run=client -o yaml | oc apply -f -
+    done
+    # the pre-category flat configmap is no longer mounted
+    oc -n grafana delete configmap grafana-dashboards --ignore-not-found >/dev/null
   fi
   rm -f "$dstmp"
   oc apply -f - <<GRAFANA
@@ -223,8 +227,18 @@ spec:
           mountPath: /etc/grafana/provisioning/datasources
         - name: dashboard-provider
           mountPath: /etc/grafana/provisioning/dashboards
-        - name: dashboards
-          mountPath: /var/lib/grafana/dashboards
+        - name: db-cluster
+          mountPath: /var/lib/grafana/dashboards/cluster
+        - name: db-control-plane
+          mountPath: /var/lib/grafana/dashboards/control-plane
+        - name: db-nodes
+          mountPath: /var/lib/grafana/dashboards/nodes
+        - name: db-workloads
+          mountPath: /var/lib/grafana/dashboards/workloads
+        - name: db-network
+          mountPath: /var/lib/grafana/dashboards/network
+        - name: db-storage
+          mountPath: /var/lib/grafana/dashboards/storage
       volumes:
       - name: data
         emptyDir: {}
@@ -235,9 +249,29 @@ spec:
         configMap:
           name: grafana-dashboard-provider
           optional: true
-      - name: dashboards
+      - name: db-cluster
         configMap:
-          name: grafana-dashboards
+          name: grafana-dashboards-cluster
+          optional: true
+      - name: db-control-plane
+        configMap:
+          name: grafana-dashboards-control-plane
+          optional: true
+      - name: db-nodes
+        configMap:
+          name: grafana-dashboards-nodes
+          optional: true
+      - name: db-workloads
+        configMap:
+          name: grafana-dashboards-workloads
+          optional: true
+      - name: db-network
+        configMap:
+          name: grafana-dashboards-network
+          optional: true
+      - name: db-storage
+        configMap:
+          name: grafana-dashboards-storage
           optional: true
 ---
 apiVersion: v1

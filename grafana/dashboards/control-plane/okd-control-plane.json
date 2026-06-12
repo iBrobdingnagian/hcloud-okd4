@@ -12,777 +12,6 @@
       "mode": "absolute",
       "steps": [
        {
-        "color": "green",
-        "value": null
-       }
-      ]
-     },
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 0,
-    "y": 0
-   },
-   "options": {
-    "colorMode": "value",
-    "graphMode": "area",
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "sum(kube_node_status_condition{condition=\"Ready\",status=\"true\"})",
-     "instant": false,
-     "legendFormat": "",
-     "refId": "A"
-    }
-   ],
-   "title": "Nodes Ready",
-   "type": "stat"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "green",
-        "value": null
-       }
-      ]
-     },
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 4,
-    "y": 0
-   },
-   "options": {
-    "colorMode": "value",
-    "graphMode": "area",
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "sum(kube_pod_status_phase{phase=\"Running\"})",
-     "instant": false,
-     "legendFormat": "",
-     "refId": "A"
-    }
-   ],
-   "title": "Pods Running",
-   "type": "stat"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "green",
-        "value": null
-       },
-       {
-        "color": "yellow",
-        "value": 2
-       },
-       {
-        "color": "red",
-        "value": 5
-       }
-      ]
-     },
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 8,
-    "y": 0
-   },
-   "options": {
-    "colorMode": "value",
-    "graphMode": "area",
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "count(ALERTS{alertstate=\"firing\"}) OR on() vector(0)",
-     "instant": false,
-     "legendFormat": "",
-     "refId": "A"
-    }
-   ],
-   "title": "Firing Alerts",
-   "type": "stat"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "max": 1,
-     "min": 0,
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "green",
-        "value": null
-       },
-       {
-        "color": "yellow",
-        "value": 0.7
-       },
-       {
-        "color": "red",
-        "value": 0.85
-       }
-      ]
-     },
-     "unit": "percentunit"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 12,
-    "y": 0
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))",
-     "instant": false,
-     "legendFormat": "",
-     "refId": "A"
-    }
-   ],
-   "title": "Cluster CPU",
-   "type": "gauge"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "max": 1,
-     "min": 0,
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "green",
-        "value": null
-       },
-       {
-        "color": "yellow",
-        "value": 0.7
-       },
-       {
-        "color": "red",
-        "value": 0.85
-       }
-      ]
-     },
-     "unit": "percentunit"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 16,
-    "y": 0
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "1 - sum(node_memory_MemAvailable_bytes) / sum(node_memory_MemTotal_bytes)",
-     "instant": false,
-     "legendFormat": "",
-     "refId": "A"
-    }
-   ],
-   "title": "Cluster Memory",
-   "type": "gauge"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "max": 1,
-     "min": 0,
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
-        "color": "green",
-        "value": null
-       },
-       {
-        "color": "yellow",
-        "value": 0.7
-       },
-       {
-        "color": "red",
-        "value": 0.85
-       }
-      ]
-     },
-     "unit": "percentunit"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 4,
-    "w": 4,
-    "x": 20,
-    "y": 0
-   },
-   "options": {
-    "reduceOptions": {
-     "calcs": [
-      "lastNotNull"
-     ]
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "1 - sum(node_filesystem_avail_bytes{mountpoint=\"/\"}) / sum(node_filesystem_size_bytes{mountpoint=\"/\"})",
-     "instant": false,
-     "legendFormat": "",
-     "refId": "A"
-    }
-   ],
-   "title": "Cluster Disk (/)",
-   "type": "gauge"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "max": 1,
-     "min": 0,
-     "unit": "percentunit"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 4
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "1 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))",
-     "instant": false,
-     "legendFormat": "{{instance}}",
-     "refId": "A"
-    }
-   ],
-   "title": "CPU usage per node",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "max": 1,
-     "min": 0,
-     "unit": "percentunit"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 4
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes",
-     "instant": false,
-     "legendFormat": "{{instance}}",
-     "refId": "A"
-    }
-   ],
-   "title": "Memory usage per node",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "unit": "Bps"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 12
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "sum by(instance)(rate(node_network_receive_bytes_total{device!~\"lo|veth.*|br-.*|ovn.*|genev_sys.*|tun.*\"}[5m]))",
-     "instant": false,
-     "legendFormat": "rx {{instance}}",
-     "refId": "A"
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "sum by(instance)(rate(node_network_transmit_bytes_total{device!~\"lo|veth.*|br-.*|ovn.*|genev_sys.*|tun.*\"}[5m]))",
-     "instant": false,
-     "legendFormat": "tx {{instance}}",
-     "refId": "B"
-    }
-   ],
-   "title": "Network throughput per node",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "max": 1,
-     "min": 0,
-     "unit": "percentunit"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 12
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "1 - node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}",
-     "instant": false,
-     "legendFormat": "{{instance}}",
-     "refId": "A"
-    }
-   ],
-   "title": "Root disk usage per node",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "unit": "short"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 20
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "topk(10, sum by(namespace,pod)(rate(container_cpu_usage_seconds_total{container!=\"\",pod!=\"\"}[5m])))",
-     "instant": false,
-     "legendFormat": "{{namespace}}/{{pod}}",
-     "refId": "A"
-    }
-   ],
-   "title": "Top 10 pods by CPU",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "unit": "bytes"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 20
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "topk(10, sum by(namespace,pod)(container_memory_working_set_bytes{container!=\"\",pod!=\"\"}))",
-     "instant": false,
-     "legendFormat": "{{namespace}}/{{pod}}",
-     "refId": "A"
-    }
-   ],
-   "title": "Top 10 pods by memory",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "unit": "reqps"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 8,
-    "x": 0,
-    "y": 28
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "sum by(code)(rate(apiserver_request_total[5m]))",
-     "instant": false,
-     "legendFormat": "{{code}}",
-     "refId": "A"
-    }
-   ],
-   "title": "API server request rate by code",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "unit": "s"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 8,
-    "x": 8,
-    "y": 28
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "histogram_quantile(0.99, sum by(le,verb)(rate(apiserver_request_duration_seconds_bucket{verb!~\"WATCH|CONNECT\"}[5m])))",
-     "instant": false,
-     "legendFormat": "{{verb}}",
-     "refId": "A"
-    }
-   ],
-   "title": "API server p99 latency by verb",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "unit": "reqps"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 8,
-    "x": 16,
-    "y": 28
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "sum(rate(apiserver_request_total{code=~\"5..\"}[5m])) OR on() vector(0)",
-     "instant": false,
-     "legendFormat": "5xx",
-     "refId": "A"
-    }
-   ],
-   "title": "API server 5xx rate",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "thresholds": {
-      "mode": "absolute",
-      "steps": [
-       {
         "color": "red",
         "value": null
        },
@@ -800,7 +29,7 @@
     "h": 4,
     "w": 4,
     "x": 0,
-    "y": 36
+    "y": 0
    },
    "options": {
     "colorMode": "value",
@@ -854,7 +83,7 @@
     "h": 4,
     "w": 4,
     "x": 4,
-    "y": 36
+    "y": 0
    },
    "options": {
     "colorMode": "value",
@@ -887,6 +116,309 @@
    },
    "fieldConfig": {
     "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 8,
+    "y": 0
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "max(increase(etcd_server_proposals_failed_total[1h])) OR on() vector(0)",
+     "instant": false,
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ],
+   "title": "etcd failed proposals (1h)",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 0
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(rate(apiserver_request_total{code=~\"5..\"}[5m])) OR on() vector(0)",
+     "instant": false,
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ],
+   "title": "API server 5xx (5m)",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1
+       }
+      ]
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 0
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(scheduler_pending_pods) OR on() vector(0)",
+     "instant": false,
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ],
+   "title": "Scheduler pending pods",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 1,
+      "showPoints": "never"
+     },
+     "unit": "reqps"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 4
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum by(code)(rate(apiserver_request_total[5m]))",
+     "instant": false,
+     "legendFormat": "{{code}}",
+     "refId": "A"
+    }
+   ],
+   "title": "API server request rate by code",
+   "type": "timeseries"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 1,
+      "showPoints": "never"
+     },
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 4
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "histogram_quantile(0.99, sum by(le,verb)(rate(apiserver_request_duration_seconds_bucket{verb!~\"WATCH|CONNECT\"}[5m])))",
+     "instant": false,
+     "legendFormat": "{{verb}}",
+     "refId": "A"
+    }
+   ],
+   "title": "API server p99 latency by verb",
+   "type": "timeseries"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 1,
+      "showPoints": "never"
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 4
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum by(request_kind)(apiserver_current_inflight_requests)",
+     "instant": false,
+     "legendFormat": "{{request_kind}}",
+     "refId": "A"
+    }
+   ],
+   "title": "API server in-flight requests",
+   "type": "timeseries"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
      "custom": {
       "fillOpacity": 10,
       "lineWidth": 1,
@@ -899,8 +431,8 @@
    "gridPos": {
     "h": 8,
     "w": 8,
-    "x": 8,
-    "y": 36
+    "x": 0,
+    "y": 12
    },
    "options": {
     "legend": {
@@ -946,8 +478,8 @@
    "gridPos": {
     "h": 8,
     "w": 8,
-    "x": 16,
-    "y": 36
+    "x": 8,
+    "y": 12
    },
    "options": {
     "legend": {
@@ -981,19 +513,29 @@
    },
    "fieldConfig": {
     "defaults": {
-     "unit": "short"
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 1,
+      "showPoints": "never"
+     },
+     "unit": "s"
     },
     "overrides": []
    },
    "gridPos": {
     "h": 8,
-    "w": 24,
-    "x": 0,
-    "y": 44
+    "w": 8,
+    "x": 16,
+    "y": 12
    },
    "options": {
-    "footer": {
-     "show": false
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
     }
    },
    "targets": [
@@ -1002,15 +544,128 @@
       "type": "prometheus",
       "uid": "${datasource}"
      },
-     "expr": "ALERTS{alertstate=\"firing\"}",
-     "format": "table",
-     "instant": true,
-     "legendFormat": "",
+     "expr": "histogram_quantile(0.99, sum by(le,pod)(rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])))",
+     "instant": false,
+     "legendFormat": "{{pod}}",
      "refId": "A"
     }
    ],
-   "title": "Firing alerts",
-   "type": "table"
+   "title": "etcd p99 WAL fsync latency",
+   "type": "timeseries"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 1,
+      "showPoints": "never"
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 20
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(rate(etcd_server_proposals_committed_total[5m]))",
+     "instant": false,
+     "legendFormat": "committed",
+     "refId": "A"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(rate(etcd_server_proposals_applied_total[5m]))",
+     "instant": false,
+     "legendFormat": "applied",
+     "refId": "B"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(rate(etcd_server_proposals_failed_total[5m]))",
+     "instant": false,
+     "legendFormat": "failed",
+     "refId": "C"
+    }
+   ],
+   "title": "etcd raft proposals",
+   "type": "timeseries"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "fillOpacity": 10,
+      "lineWidth": 1,
+      "showPoints": "never"
+     },
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 20
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "histogram_quantile(0.99, sum by(le,pod)(rate(etcd_network_peer_round_trip_time_seconds_bucket[5m])))",
+     "instant": false,
+     "legendFormat": "{{pod}}",
+     "refId": "A"
+    }
+   ],
+   "title": "etcd network peer round-trip p99",
+   "type": "timeseries"
   }
  ],
  "refresh": "30s",
@@ -1036,7 +691,7 @@
   "to": "now"
  },
  "timezone": "browser",
- "title": "OKD / Cluster Overview",
- "uid": "okd-cluster-overview",
+ "title": "API Server & etcd",
+ "uid": "okd-control-plane",
  "version": 1
 }

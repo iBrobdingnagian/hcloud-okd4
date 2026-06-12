@@ -8,14 +8,236 @@
    },
    "fieldConfig": {
     "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 5
+       }
+      ]
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 0,
+    "y": 0
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(kube_pod_status_ready{condition=\"false\"}) OR on() vector(0)",
+     "instant": false,
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ],
+   "title": "Not-ready pods",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1
+       }
+      ]
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 6,
+    "y": 0
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(kube_pod_status_phase{phase=\"Pending\"}) OR on() vector(0)",
+     "instant": false,
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ],
+   "title": "Pending pods",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 12,
+    "y": 0
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"}) OR on() vector(0)",
+     "instant": false,
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ],
+   "title": "OOMKilled containers (present)",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 10
+       }
+      ]
+     },
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "gridPos": {
+    "h": 4,
+    "w": 6,
+    "x": 18,
+    "y": 0
+   },
+   "options": {
+    "colorMode": "value",
+    "graphMode": "area",
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ]
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${datasource}"
+     },
+     "expr": "sum(increase(kube_pod_container_status_restarts_total[1h])) OR on() vector(0)",
+     "instant": false,
+     "legendFormat": "",
+     "refId": "A"
+    }
+   ],
+   "title": "Restarts cluster-wide (1h)",
+   "type": "stat"
+  },
+  {
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${datasource}"
+   },
+   "fieldConfig": {
+    "defaults": {
      "custom": {
       "fillOpacity": 10,
       "lineWidth": 1,
       "showPoints": "never"
      },
-     "max": 1,
-     "min": 0,
-     "unit": "percentunit"
+     "unit": "short"
     },
     "overrides": []
    },
@@ -23,7 +245,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 0
+    "y": 4
    },
    "options": {
     "legend": {
@@ -41,13 +263,13 @@
       "type": "prometheus",
       "uid": "${datasource}"
      },
-     "expr": "1 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\",instance=~\"$node\"}[5m]))",
+     "expr": "sum by(phase)(kube_pod_status_phase)",
      "instant": false,
-     "legendFormat": "{{instance}}",
+     "legendFormat": "{{phase}}",
      "refId": "A"
     }
    ],
-   "title": "CPU usage",
+   "title": "Pods by phase",
    "type": "timeseries"
   },
   {
@@ -70,7 +292,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 0
+    "y": 4
    },
    "options": {
     "legend": {
@@ -88,33 +310,13 @@
       "type": "prometheus",
       "uid": "${datasource}"
      },
-     "expr": "node_load1{instance=~\"$node\"}",
+     "expr": "sum by(reason)(kube_pod_container_status_waiting_reason) OR on() vector(0)",
      "instant": false,
-     "legendFormat": "1m {{instance}}",
+     "legendFormat": "{{reason}}",
      "refId": "A"
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "node_load5{instance=~\"$node\"}",
-     "instant": false,
-     "legendFormat": "5m {{instance}}",
-     "refId": "B"
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "node_load15{instance=~\"$node\"}",
-     "instant": false,
-     "legendFormat": "15m {{instance}}",
-     "refId": "C"
     }
    ],
-   "title": "Load average",
+   "title": "Waiting containers by reason",
    "type": "timeseries"
   },
   {
@@ -129,7 +331,7 @@
       "lineWidth": 1,
       "showPoints": "never"
      },
-     "unit": "bytes"
+     "unit": "short"
     },
     "overrides": []
    },
@@ -137,7 +339,7 @@
     "h": 8,
     "w": 12,
     "x": 0,
-    "y": 8
+    "y": 12
    },
    "options": {
     "legend": {
@@ -155,23 +357,13 @@
       "type": "prometheus",
       "uid": "${datasource}"
      },
-     "expr": "node_memory_MemTotal_bytes{instance=~\"$node\"} - node_memory_MemAvailable_bytes{instance=~\"$node\"}",
+     "expr": "topk(10, sum by(namespace,pod)(increase(kube_pod_container_status_restarts_total[1h])))",
      "instant": false,
-     "legendFormat": "used {{instance}}",
+     "legendFormat": "{{namespace}}/{{pod}}",
      "refId": "A"
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "node_memory_MemTotal_bytes{instance=~\"$node\"}",
-     "instant": false,
-     "legendFormat": "total {{instance}}",
-     "refId": "B"
     }
    ],
-   "title": "Memory used",
+   "title": "Top 10 pods by restarts (1h)",
    "type": "timeseries"
   },
   {
@@ -186,9 +378,7 @@
       "lineWidth": 1,
       "showPoints": "never"
      },
-     "max": 1,
-     "min": 0,
-     "unit": "percentunit"
+     "unit": "short"
     },
     "overrides": []
    },
@@ -196,7 +386,7 @@
     "h": 8,
     "w": 12,
     "x": 12,
-    "y": 8
+    "y": 12
    },
    "options": {
     "legend": {
@@ -214,13 +404,13 @@
       "type": "prometheus",
       "uid": "${datasource}"
      },
-     "expr": "1 - node_memory_MemAvailable_bytes{instance=~\"$node\"} / node_memory_MemTotal_bytes{instance=~\"$node\"}",
+     "expr": "sum by(reason)(kube_pod_container_status_last_terminated_reason) OR on() vector(0)",
      "instant": false,
-     "legendFormat": "{{instance}}",
+     "legendFormat": "{{reason}}",
      "refId": "A"
     }
    ],
-   "title": "Memory usage %",
+   "title": "Containers last terminated by reason",
    "type": "timeseries"
   },
   {
@@ -230,128 +420,7 @@
    },
    "fieldConfig": {
     "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "unit": "Bps"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 0,
-    "y": 16
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "rate(node_disk_read_bytes_total{instance=~\"$node\"}[5m])",
-     "instant": false,
-     "legendFormat": "read {{instance}} {{device}}",
-     "refId": "A"
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "rate(node_disk_written_bytes_total{instance=~\"$node\"}[5m])",
-     "instant": false,
-     "legendFormat": "write {{instance}} {{device}}",
-     "refId": "B"
-    }
-   ],
-   "title": "Disk I/O",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "unit": "Bps"
-    },
-    "overrides": []
-   },
-   "gridPos": {
-    "h": 8,
-    "w": 12,
-    "x": 12,
-    "y": 16
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
-    }
-   },
-   "targets": [
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "sum by(instance)(rate(node_network_receive_bytes_total{instance=~\"$node\",device!~\"lo|veth.*|br-.*|ovn.*|genev_sys.*|tun.*\"}[5m]))",
-     "instant": false,
-     "legendFormat": "rx {{instance}}",
-     "refId": "A"
-    },
-    {
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${datasource}"
-     },
-     "expr": "sum by(instance)(rate(node_network_transmit_bytes_total{instance=~\"$node\",device!~\"lo|veth.*|br-.*|ovn.*|genev_sys.*|tun.*\"}[5m]))",
-     "instant": false,
-     "legendFormat": "tx {{instance}}",
-     "refId": "B"
-    }
-   ],
-   "title": "Network throughput",
-   "type": "timeseries"
-  },
-  {
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${datasource}"
-   },
-   "fieldConfig": {
-    "defaults": {
-     "custom": {
-      "fillOpacity": 10,
-      "lineWidth": 1,
-      "showPoints": "never"
-     },
-     "max": 1,
-     "min": 0,
-     "unit": "percentunit"
+     "unit": "short"
     },
     "overrides": []
    },
@@ -359,16 +428,11 @@
     "h": 8,
     "w": 24,
     "x": 0,
-    "y": 24
+    "y": 20
    },
    "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi",
-     "sort": "desc"
+    "footer": {
+     "show": false
     }
    },
    "targets": [
@@ -377,14 +441,15 @@
       "type": "prometheus",
       "uid": "${datasource}"
      },
-     "expr": "1 - node_filesystem_avail_bytes{instance=~\"$node\",fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{instance=~\"$node\",fstype!~\"tmpfs|overlay\"}",
-     "instant": false,
-     "legendFormat": "{{instance}} {{mountpoint}}",
+     "expr": "kube_pod_status_ready{condition=\"false\"} == 1",
+     "format": "table",
+     "instant": true,
+     "legendFormat": "",
      "refId": "A"
     }
    ],
-   "title": "Filesystem usage by mountpoint",
-   "type": "timeseries"
+   "title": "Not-ready pods (excluding Succeeded)",
+   "type": "table"
   }
  ],
  "refresh": "30s",
@@ -402,31 +467,6 @@
     "name": "datasource",
     "query": "prometheus",
     "type": "datasource"
-   },
-   {
-    "current": {
-     "selected": true,
-     "text": [
-      "All"
-     ],
-     "value": [
-      "$__all"
-     ]
-    },
-    "datasource": {
-     "type": "prometheus",
-     "uid": "${datasource}"
-    },
-    "includeAll": true,
-    "multi": true,
-    "name": "node",
-    "query": {
-     "query": "label_values(node_cpu_seconds_total, instance)",
-     "refId": "node"
-    },
-    "refresh": 2,
-    "sort": 1,
-    "type": "query"
    }
   ]
  },
@@ -435,7 +475,7 @@
   "to": "now"
  },
  "timezone": "browser",
- "title": "OKD / Nodes",
- "uid": "okd-nodes",
+ "title": "Pods Health",
+ "uid": "okd-pods-health",
  "version": 1
 }
