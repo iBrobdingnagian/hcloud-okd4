@@ -16,6 +16,35 @@ This setup is suitable for small test environments only. Not recommended for pro
 
 ---
 
+## Automated Deploy / Destroy
+
+`deploy-okd.sh` and `destroy-okd.sh` wrap the whole Quick Start procedure below
+(plus the live region/pricing checks, CSR approval, and DNS-cache fixes
+discovered while running this on Hetzner) into two scripts:
+
+```bash
+cp .env.example .env   # fill in HCLOUD_TOKEN, CLOUDFLARE_*, TF_VAR_dns_domain, TF_VAR_dns_zone_id
+./deploy-okd.sh --yes        # non-interactive: 3 masters/3 workers, cheapest types, current region, 8h
+./destroy-okd.sh --yes       # tear down all terraform-managed resources
+```
+
+Run `./deploy-okd.sh --help` for all options (region, master/worker counts and
+types, OKD release, lab duration, etc.). Without `--yes` both scripts walk you
+through interactive prompts (region picker, live pricing, version selection,
+htpasswd admin creation).
+
+Notes:
+- `--yes` implies `--no-admin` (passwords can't be prompted non-interactively);
+  the cluster is left on the `kubeadmin` credentials printed in the summary.
+- Auto-destroy scheduling (`--no-autodestroy` to skip) is only wired up on
+  macOS (launchd); on Linux, run `./destroy-okd.sh` yourself before the
+  estimated lab duration elapses to avoid ongoing Hetzner charges.
+- New OpenShift nodes periodically submit fresh serving-cert CSRs; on
+  platform "none" nothing approves them automatically. Run `make sign_csr`
+  (or repeat step 11 below) until `oc get csr` shows nothing pending.
+
+---
+
 ## Architecture
 
 By default, a single-node cluster is deployed with the following components:
@@ -27,10 +56,17 @@ By default, a single-node cluster is deployed with the following components:
 | Bootstrap Node| cpx41 (removed after bootstrap) |
 | Ignition Node | cpx21 (removed after bootstrap) |
 
-Additional worker nodes can be added by setting an environment variable **before** running Terraform:
+Server types and the Hetzner network zone are all configurable via Terraform
+variables (set in `.env`, see `.env.example`):
 
 ```bash
-export TF_VAR_replicas_worker=3  # Example: 3 worker nodes
+export TF_VAR_replicas_worker=3       # additional worker nodes
+export TF_VAR_server_type_master=cpx41
+export TF_VAR_server_type_worker=cpx41
+export TF_VAR_server_type_bootstrap=cpx41
+export TF_VAR_server_type_ignition=cpx21
+export TF_VAR_network_zone=eu-central # must match TF_VAR_location's region
+export TF_VAR_fcos_release=           # pin to a specific CoreOS snapshot, or leave empty for most recent
 ```
 
 ---
@@ -72,6 +108,11 @@ For OCP (Red Hat OpenShift), you will also need a valid pull secret, available f
    ```bash
    make hcloud_image
    ```
+   Set `PACKER_LOCATION`/`PACKER_SERVER_TYPE` to control where the temporary
+   build server runs (defaults: `nbg1` / `cx33`). The image URL is read from
+   `openshift-install coreos print-stream-json`; current FCOS streams only
+   publish a `qcow2.xz` artifact (no `qcow2.gz`), and the packer provisioner
+   decompresses with `xz`.
 7. Deploy infrastructure with Terraform (including bootstrap and ignition node)
    ```bash
    make infrastructure BOOTSTRAP=true

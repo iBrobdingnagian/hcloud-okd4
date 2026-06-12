@@ -11,3 +11,9 @@ terraform/terraform.tfstate
 terraform/terraform.tfstate.*
 openshift-install-linux-*.tar.gz
 openshift-client-linux-*.tar.gz
+.env
+okd4_new_id_rsa
+okd4_new_id_rsa.pub
+ignition-auth-backup-*
+autodestroy.log
+logs/

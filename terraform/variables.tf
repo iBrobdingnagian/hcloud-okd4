@@ -70,3 +70,39 @@ variable "image" {
   description = "Image selector (either fcos or rhcos)"
   default     = "fcos"
 }
+
+variable "server_type_master" {
+  type        = string
+  description = "Server type for master nodes"
+  default     = "cpx41"
+}
+
+variable "server_type_worker" {
+  type        = string
+  description = "Server type for worker nodes"
+  default     = "cpx41"
+}
+
+variable "server_type_bootstrap" {
+  type        = string
+  description = "Server type for the bootstrap node"
+  default     = "cpx41"
+}
+
+variable "server_type_ignition" {
+  type        = string
+  description = "Server type for the ignition node"
+  default     = "cpx21"
+}
+
+variable "network_zone" {
+  type        = string
+  description = "Hetzner network zone the subnets are created in (eu-central, us-east, us-west, ap-southeast)"
+  default     = "eu-central"
+}
+
+variable "fcos_release" {
+  type        = string
+  description = "Pin the CoreOS snapshot to this release label (empty = most recent snapshot)"
+  default     = ""
+}
