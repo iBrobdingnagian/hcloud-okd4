@@ -33,12 +33,52 @@ types, OKD release, lab duration, etc.). Without `--yes` both scripts walk you
 through interactive prompts (region picker, live pricing, version selection,
 htpasswd admin creation).
 
+### Deployment profiles
+
+When run interactively without `--masters`/`--workers`/`--master-type`/
+`--worker-type`, `deploy-okd.sh` first asks which deployment profile to use
+(or pass `--profile N` to skip the menu):
+
+1. **Production - Best Servers** — 3 masters / 3 workers on dedicated CCX
+   types (>=8 vCPU / 32 GB for masters, >=4 vCPU / 16 GB for workers).
+2. **Production - Cost Optimized** — 3 masters / 3 workers on the cheapest
+   qualifying types in the chosen region. This is also what `--yes` uses by
+   default.
+3. **Lab** — choose a topology (`--lab-topology`: `1x0`, `1x1`, `1x2`, `1x3`
+   or `3x3`, masters x workers) and a cost tier (`--lab-tier`: `low` =
+   cheapest qualifying, `mid` = mid-range, `high` = dedicated CCX types).
+   `1x0` is a single schedulable master with no separate workers.
+4. **Manual** — the original interactive picker (region, counts, types).
+   Selected automatically if you pass `--masters`/`--workers`/
+   `--master-type`/`--worker-type` directly.
+
+### Adaptive scaling
+
+If `deploy-okd.sh` finds an existing cluster for `TF_VAR_dns_domain` already
+running in Hetzner, it offers to **scale** it instead of refusing to proceed:
+pass `--scale` (with `--masters`/`--workers` for the new *total* counts, or
+answer the prompts) to add or remove nodes on a live cluster.
+
+- **Workers**: scaling up runs `terraform apply` to create the new VM(s) and
+  approves their CSRs until they're `Ready`. Scaling down cordons/drains the
+  highest-numbered worker(s), deletes their Node objects, then runs
+  `terraform apply` to destroy the VM(s).
+- **Masters**: supported the same way, but is **experimental** — etcd
+  membership is not guaranteed to reconcile automatically on platform "none".
+  Scaling down additionally removes the member via `etcdctl member remove`
+  before the VM is destroyed. Even master counts are rejected (etcd quorum).
+  After scaling masters, check `oc get etcd -o jsonpath='{.status.conditions}'`
+  and `oc -n openshift-etcd get pods`.
+
 Notes:
 - `--yes` implies `--no-admin` (passwords can't be prompted non-interactively);
   the cluster is left on the `kubeadmin` credentials printed in the summary.
-- Auto-destroy scheduling (`--no-autodestroy` to skip) is only wired up on
-  macOS (launchd); on Linux, run `./destroy-okd.sh` yourself before the
-  estimated lab duration elapses to avoid ongoing Hetzner charges.
+- Auto-destroy scheduling (`--no-autodestroy` to skip, `--autodestroy-at` to
+  pick a different time than `--duration`) is wired up on macOS (launchd) and
+  Linux (a `systemd --user` timer, falling back to `at` if `systemd-run` is
+  unavailable). On Linux, `systemd --user` timers only fire while you're
+  logged in unless you run `sudo loginctl enable-linger $USER`. A manual
+  `./destroy-okd.sh` cancels any pending auto-destroy.
 - New OpenShift nodes periodically submit fresh serving-cert CSRs; on
   platform "none" nothing approves them automatically. Run `make sign_csr`
   (or repeat step 11 below) until `oc get csr` shows nothing pending.

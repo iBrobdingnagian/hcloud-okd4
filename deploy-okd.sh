@@ -18,6 +18,15 @@ usage() {
   cat <<'USAGE'
 Usage: ./deploy-okd.sh [options]
   --region X        Hetzner location (e.g. nbg1, fsn1, hel1, ash, hil, sin)
+  --profile N       deployment profile (skips the interactive menu):
+                      1 = Production - Best Servers (3 masters / 3 workers,
+                          dedicated CCX types)
+                      2 = Production - Cost Optimized (3 masters / 3 workers,
+                          cheapest qualifying types)
+                      3 = Lab (pick --lab-topology and --lab-tier)
+                      4 = Manual (interactive picker, default)
+  --lab-topology T  profile 3 only: 1x0, 1x1, 1x2, 1x3 or 3x3 (masters x workers)
+  --lab-tier T      profile 3 only: low, mid or high (cost/spec tier)
   --masters N       master count (1/3/5; even counts need confirmation)
   --workers N       worker count
   --master-type T   server type for masters (e.g. cpx42)
@@ -27,25 +36,36 @@ Usage: ./deploy-okd.sh [options]
   --rebuild-image   build the CoreOS snapshot even if one exists for this release
   --no-admin        skip the htpasswd admin step
   --no-autodestroy  do not schedule the automatic teardown
+  --autodestroy-at D schedule auto-destroy after D (hours or Nm minutes,
+                    same syntax as --duration); defaults to --duration
+  --scale           if an existing cluster is found, offer to add masters/
+                    workers to it instead of refusing to proceed
   --yes             non-interactive: defaults for everything not given above
-                    (3 masters, 3 workers, current region, cheapest types, 8h)
+                    (profile 2: 3 masters, 3 workers, current region,
+                    cheapest types, 8h)
   --help            this text
 USAGE
 }
 FLAG_REGION="" FLAG_MASTERS="" FLAG_WORKERS="" FLAG_MASTER_TYPE="" FLAG_WORKER_TYPE=""
 FLAG_DURATION="" FLAG_RELEASE="" REBUILD_IMAGE=0 NO_ADMIN=0 NO_AUTODESTROY=0 ASSUME_YES=0
+FLAG_PROFILE="" FLAG_LAB_TOPOLOGY="" FLAG_LAB_TIER="" FLAG_AUTODESTROY_AT="" FLAG_SCALE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --region)         FLAG_REGION=${2:?--region needs a value}; shift 2 ;;
+    --profile)        FLAG_PROFILE=${2:?--profile needs a value}; shift 2 ;;
+    --lab-topology)   FLAG_LAB_TOPOLOGY=${2:?--lab-topology needs a value}; shift 2 ;;
+    --lab-tier)       FLAG_LAB_TIER=${2:?--lab-tier needs a value}; shift 2 ;;
     --masters)        FLAG_MASTERS=${2:?--masters needs a value}; shift 2 ;;
     --workers)        FLAG_WORKERS=${2:?--workers needs a value}; shift 2 ;;
     --master-type)    FLAG_MASTER_TYPE=${2:?--master-type needs a value}; shift 2 ;;
     --worker-type)    FLAG_WORKER_TYPE=${2:?--worker-type needs a value}; shift 2 ;;
     --duration)       FLAG_DURATION=${2:?--duration needs a value}; shift 2 ;;
+    --autodestroy-at) FLAG_AUTODESTROY_AT=${2:?--autodestroy-at needs a value}; shift 2 ;;
     --release)        FLAG_RELEASE=${2:?--release needs a value}; shift 2 ;;
     --rebuild-image)  REBUILD_IMAGE=1; shift ;;
     --no-admin)       NO_ADMIN=1; shift ;;
     --no-autodestroy) NO_AUTODESTROY=1; shift ;;
+    --scale)          FLAG_SCALE=1; shift ;;
     --yes)            ASSUME_YES=1; NO_ADMIN=1; shift ;;  # passwords can't be prompted non-interactively
     --help)           usage; exit 0 ;;
     *)                usage; err "unknown option: $1" ;;
@@ -166,8 +186,272 @@ fi
 [ -f okd4_new_id_rsa ]       || err "okd4_new_id_rsa SSH key not found in repo root"
 chmod 600 okd4_new_id_rsa
 
-# ── 1. region selection (live from Hetzner API) ──────────────────────────
+# ── 0. adaptive scale-up: is there already a cluster for this domain? ────
 export $(grep -v '^#' .env | xargs)
+DOMAIN=${TF_VAR_dns_domain:-}
+if [ -n "$DOMAIN" ]; then
+  EXISTING_SERVERS=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
+    "https://api.hetzner.cloud/v1/servers" \
+    | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | endswith("." + $d))] | length')
+else
+  EXISTING_SERVERS=0
+fi
+
+if [ "${EXISTING_SERVERS:-0}" -gt 0 ] 2>/dev/null; then
+  CUR_MASTERS=${TF_VAR_replicas_master:-0}
+  CUR_WORKERS=${TF_VAR_replicas_worker:-0}
+  log "Found $EXISTING_SERVERS existing server(s) for $DOMAIN (currently $CUR_MASTERS master(s) / $CUR_WORKERS worker(s) in .env)"
+
+  DO_SCALE=0
+  if [ "$FLAG_SCALE" = 1 ]; then
+    DO_SCALE=1
+  elif [ "$ASSUME_YES" = 1 ]; then
+    err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale to add/remove nodes"
+  else
+    echo
+    echo "  1) Scale — add or remove masters/workers on this cluster"
+    echo "  2) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
+    printf 'Selection [2]: '
+    read -r SCSEL; SCSEL=${SCSEL:-2}
+    [ "$SCSEL" = "1" ] && DO_SCALE=1
+  fi
+
+  if [ "$DO_SCALE" = 0 ]; then
+    echo "Aborted."
+    exit 0
+  fi
+
+  # ── scale flow (up and/or down) ─────────────────────────────────────
+  if [ -n "$FLAG_WORKERS" ]; then NEW_WORKERS=$FLAG_WORKERS
+  elif [ "$ASSUME_YES" = 1 ]; then NEW_WORKERS=$CUR_WORKERS
+  else printf 'New TOTAL worker count [%d]: ' "$CUR_WORKERS"; read -r NEW_WORKERS; NEW_WORKERS=${NEW_WORKERS:-$CUR_WORKERS}; fi
+  if [ -n "$FLAG_MASTERS" ]; then NEW_MASTERS=$FLAG_MASTERS
+  elif [ "$ASSUME_YES" = 1 ]; then NEW_MASTERS=$CUR_MASTERS
+  else printf 'New TOTAL master count [%d]: ' "$CUR_MASTERS"; read -r NEW_MASTERS; NEW_MASTERS=${NEW_MASTERS:-$CUR_MASTERS}; fi
+  case "$NEW_MASTERS$NEW_WORKERS" in *[!0-9]*) err "counts must be numbers";; esac
+  [ "$NEW_WORKERS" -ge 0 ] || err "worker count cannot be negative"
+  [ "$NEW_MASTERS" -ge 1 ] || err "at least 1 master required"
+  if [ "$NEW_MASTERS" = "$CUR_MASTERS" ] && [ "$NEW_WORKERS" = "$CUR_WORKERS" ]; then
+    err "nothing to do: master/worker counts unchanged ($CUR_MASTERS/$CUR_WORKERS)"
+  fi
+  if [ "$NEW_MASTERS" -lt "$CUR_MASTERS" ] && [ $((NEW_MASTERS % 2)) -eq 0 ] && [ "$NEW_MASTERS" -ne 0 ]; then
+    err "even master count ($NEW_MASTERS) is an etcd anti-pattern — scale to 1, 3 or 5"
+  fi
+
+  if [ "$NEW_MASTERS" -gt "$CUR_MASTERS" ]; then
+    cat <<'MUPWARN'
+
+  WARNING: adding masters to a running cluster is EXPERIMENTAL. terraform
+  will create the new master VM(s) and they will join as Ready nodes via
+  the usual CSR approval, but etcd membership is NOT guaranteed to be
+  reconciled automatically on platform "none". After this finishes, check:
+    oc get nodes
+    oc get etcd -o jsonpath='{.status.conditions}'
+    oc -n openshift-etcd get pods
+  and consult the cluster-etcd-operator logs if the new master(s) do not
+  show up as etcd members.
+MUPWARN
+    if [ "$ASSUME_YES" = 0 ]; then
+      printf 'Continue adding masters? [y/N]: '
+      read -r MOK
+      [ "$MOK" = "y" ] || [ "$MOK" = "Y" ] || { echo "Aborted."; exit 0; }
+    fi
+  fi
+  if [ "$NEW_MASTERS" -lt "$CUR_MASTERS" ]; then
+    cat <<'MDOWNWARN'
+
+  WARNING: removing masters from a running cluster is EXPERIMENTAL. This
+  will drain the node, remove it from the etcd cluster via etcdctl, delete
+  the Kubernetes Node object, and then have terraform destroy the VM(s)
+  with the highest index(es). If the etcd member removal fails partway
+  through, the cluster may be left with a stale/unhealthy etcd member —
+  check `oc get etcd -o jsonpath='{.status.conditions}'` and
+  `oc -n openshift-etcd get pods` afterwards.
+MDOWNWARN
+    if [ "$ASSUME_YES" = 0 ]; then
+      printf 'Continue removing master(s)? [y/N]: '
+      read -r MOK
+      [ "$MOK" = "y" ] || [ "$MOK" = "Y" ] || { echo "Aborted."; exit 0; }
+    fi
+  fi
+
+  export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+  TOOLBOX=quay.io/slauger/hcloud-okd4:$OPENSHIFT_RELEASE
+
+  log "Toolbox image"
+  if docker image inspect "$TOOLBOX" >/dev/null 2>&1; then
+    echo "    $TOOLBOX already present — skipping fetch/build"
+  else
+    make fetch
+    make build
+  fi
+
+  # ── scale-down: drain/remove nodes BEFORE terraform destroys their VMs ──
+  if [ "$NEW_WORKERS" -lt "$CUR_WORKERS" ]; then
+    log "Draining $((CUR_WORKERS - NEW_WORKERS)) worker node(s) before removal"
+    for i in $(seq $((NEW_WORKERS + 1)) "$CUR_WORKERS"); do
+      NODE=$(printf 'worker%02d.%s' "$i" "$DOMAIN")
+      echo "    draining $NODE"
+      oc adm cordon "$NODE" 2>/dev/null || true
+      oc adm drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force --timeout=180s 2>/dev/null || true
+      oc delete node "$NODE" 2>/dev/null || true
+    done
+  fi
+  if [ "$NEW_MASTERS" -lt "$CUR_MASTERS" ]; then
+    log "Removing $((CUR_MASTERS - NEW_MASTERS)) master node(s) from etcd before removal"
+    # any remaining etcd pod can run etcdctl against the whole cluster
+    ETCD_POD=$(oc -n openshift-etcd get pods -l app=etcd -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    [ -n "$ETCD_POD" ] || echo "    WARNING: could not find an etcd pod — skipping etcdctl member removal"
+    for i in $(seq $((NEW_MASTERS + 1)) "$CUR_MASTERS"); do
+      NODE=$(printf 'master%02d.%s' "$i" "$DOMAIN")
+      SHORT=$(printf 'master%02d' "$i")
+      echo "    draining $NODE"
+      oc adm cordon "$NODE" 2>/dev/null || true
+      oc adm drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force --timeout=180s 2>/dev/null || true
+      if [ -n "$ETCD_POD" ]; then
+        MEMBER_ID=$(oc -n openshift-etcd exec "$ETCD_POD" -c etcdctl -- etcdctl member list -w simple 2>/dev/null \
+          | awk -F, -v n="$SHORT" '$3 ~ n {print $1}')
+        if [ -n "$MEMBER_ID" ]; then
+          echo "    removing etcd member $MEMBER_ID ($SHORT)"
+          oc -n openshift-etcd exec "$ETCD_POD" -c etcdctl -- etcdctl member remove "$MEMBER_ID" 2>/dev/null \
+            || echo "    WARNING: etcdctl member remove failed for $SHORT — check etcd health manually"
+        else
+          echo "    WARNING: no etcd member found matching $SHORT — skipping"
+        fi
+      fi
+      oc delete node "$NODE" 2>/dev/null || true
+    done
+  fi
+
+  sedi -E \
+    -e "s|^TF_VAR_replicas_master=.*|TF_VAR_replicas_master=$NEW_MASTERS|" \
+    -e "s|^TF_VAR_replicas_worker=.*|TF_VAR_replicas_worker=$NEW_WORKERS|" .env
+  export $(grep -v '^#' .env | xargs)
+
+  log "Applying infrastructure changes (terraform): $CUR_MASTERS -> $NEW_MASTERS master(s), $CUR_WORKERS -> $NEW_WORKERS worker(s)"
+  tb "make infrastructure"
+  flush_dns
+
+  EXPECTED=$((NEW_MASTERS + NEW_WORKERS))
+  if [ "$NEW_MASTERS" -gt "$CUR_MASTERS" ] || [ "$NEW_WORKERS" -gt "$CUR_WORKERS" ]; then
+    log "Approving CSRs until all $EXPECTED nodes are Ready"
+    tries=0
+    while [ $tries -lt 60 ]; do
+      oc get csr -o name 2>/dev/null | xargs -r oc adm certificate approve 2>/dev/null || true
+      READY=$(oc get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l | tr -d ' ')
+      [ "$READY" -ge "$EXPECTED" ] && break
+      tries=$((tries+1)); sleep 20
+    done
+  fi
+  oc get nodes
+  READY=$(oc get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l | tr -d ' ')
+  if [ "${READY:-0}" -ge "$EXPECTED" ]; then
+    echo "    all $EXPECTED nodes are Ready"
+  else
+    echo "    WARNING: node count is ${READY:-0}, expected $EXPECTED — check: oc get nodes / oc get csr"
+  fi
+  if [ "$NEW_MASTERS" -ne "$CUR_MASTERS" ]; then
+    echo
+    echo "    verify etcd membership:"
+    echo "      oc get etcd -o jsonpath='{.status.conditions}'"
+    echo "      oc -n openshift-etcd get pods"
+  fi
+  log "Scale complete: $NEW_MASTERS master(s), $NEW_WORKERS worker(s)"
+  exit 0
+fi
+
+# ── 0b. deployment profile ────────────────────────────────────────────────
+if [ -n "$FLAG_PROFILE" ]; then
+  PROFILE=$FLAG_PROFILE
+elif [ "$ASSUME_YES" = 1 ]; then
+  PROFILE=2
+elif [ -n "$FLAG_MASTERS$FLAG_WORKERS$FLAG_MASTER_TYPE$FLAG_WORKER_TYPE" ]; then
+  PROFILE=4   # explicit topology/type flags given -> go straight to manual
+else
+  echo
+  echo "Choose a deployment profile:"
+  echo "  1) Production - Best Servers    (3 masters / 3 workers, dedicated CCX types)"
+  echo "  2) Production - Cost Optimized  (3 masters / 3 workers, cheapest qualifying types)"
+  echo "  3) Lab                          (choose topology and cost tier)"
+  echo "  4) Manual                       (pick region, counts and types yourself)"
+  printf 'Selection [4]: '
+  read -r PROFILE; PROFILE=${PROFILE:-4}
+fi
+case "$PROFILE" in 1|2|3|4) ;; *) err "invalid profile: $PROFILE (must be 1-4)";; esac
+
+# defaults a profile may override: OKD minimum specs, no type-name filter,
+# "interactive" strategy = old behaviour (prompt, or cheapest with --yes)
+MIN_C_MASTER=4 MIN_R_MASTER=16 MIN_C_WORKER=2 MIN_R_WORKER=8
+TYPE_PREFIX="" TYPE_STRATEGY="interactive"
+
+case "$PROFILE" in
+  1)
+    MASTERS=3 WORKERS=3
+    MIN_C_MASTER=8 MIN_R_MASTER=32 MIN_C_WORKER=4 MIN_R_WORKER=16
+    TYPE_PREFIX="ccx" TYPE_STRATEGY="cheapest"
+    log "Profile 1: Production - Best Servers (3 masters / 3 workers, dedicated CCX types)"
+    ;;
+  2)
+    MASTERS=3 WORKERS=3
+    TYPE_STRATEGY="cheapest"
+    log "Profile 2: Production - Cost Optimized (3 masters / 3 workers, cheapest qualifying types)"
+    ;;
+  3)
+    if [ -n "$FLAG_LAB_TOPOLOGY" ]; then LAB_TOPOLOGY=$FLAG_LAB_TOPOLOGY
+    elif [ "$ASSUME_YES" = 1 ]; then LAB_TOPOLOGY=1x1
+    else
+      echo
+      echo "Lab topology (masters x workers):"
+      echo "  1) 1x0   single node, schedulable master, no separate workers"
+      echo "  2) 1x1"
+      echo "  3) 1x2"
+      echo "  4) 1x3"
+      echo "  5) 3x3   highly available control plane"
+      printf 'Selection [2]: '
+      read -r TSEL; TSEL=${TSEL:-2}
+      case "$TSEL" in
+        1) LAB_TOPOLOGY=1x0 ;; 2) LAB_TOPOLOGY=1x1 ;; 3) LAB_TOPOLOGY=1x2 ;;
+        4) LAB_TOPOLOGY=1x3 ;; 5) LAB_TOPOLOGY=3x3 ;; *) err "invalid selection";;
+      esac
+    fi
+    case "$LAB_TOPOLOGY" in
+      1x0) MASTERS=1 WORKERS=0 ;;
+      1x1) MASTERS=1 WORKERS=1 ;;
+      1x2) MASTERS=1 WORKERS=2 ;;
+      1x3) MASTERS=1 WORKERS=3 ;;
+      3x3) MASTERS=3 WORKERS=3 ;;
+      *) err "invalid lab topology: $LAB_TOPOLOGY (use 1x0, 1x1, 1x2, 1x3 or 3x3)" ;;
+    esac
+
+    if [ -n "$FLAG_LAB_TIER" ]; then LAB_TIER=$FLAG_LAB_TIER
+    elif [ "$ASSUME_YES" = 1 ]; then LAB_TIER=low
+    else
+      echo
+      echo "Lab cost tier:"
+      echo "  1) low   cheapest qualifying types (OKD minimum specs)"
+      echo "  2) mid   mid-range types (more headroom)"
+      echo "  3) high  dedicated CCX types (best performance)"
+      printf 'Selection [1]: '
+      read -r TIERSEL; TIERSEL=${TIERSEL:-1}
+      case "$TIERSEL" in 1) LAB_TIER=low ;; 2) LAB_TIER=mid ;; 3) LAB_TIER=high ;; *) err "invalid selection";; esac
+    fi
+    case "$LAB_TIER" in
+      low)  TYPE_STRATEGY="cheapest" ;;
+      mid)  TYPE_STRATEGY="mid" ;;
+      high)
+        MIN_C_MASTER=8 MIN_R_MASTER=32 MIN_C_WORKER=4 MIN_R_WORKER=16
+        TYPE_PREFIX="ccx" TYPE_STRATEGY="cheapest"
+        ;;
+      *) err "invalid lab tier: $LAB_TIER (use low, mid or high)" ;;
+    esac
+    log "Profile 3: Lab ($LAB_TOPOLOGY topology, $LAB_TIER cost tier)"
+    ;;
+  4)
+    log "Profile 4: Manual"
+    ;;
+esac
+
+# ── 1. region selection (live from Hetzner API) ──────────────────────────
 DEFAULT_LOC=${TF_VAR_location:-nbg1}
 
 log "Fetching Hetzner regions and live server-type availability ..."
@@ -249,17 +533,32 @@ CANDIDATES=$(echo "$TYPES_JSON" | jq -r --argjson avail "$AVAIL_IDS" --arg loc "
   | @tsv' | sort -t"$(printf '\t')" -k5 -n)
 [ -n "$CANDIDATES" ] || err "no x86 server types available in $LOC right now"
 
-pick_type() {  # pick_type <role> <min_cores> <min_ram_gb> <preset-or-empty> → PICKED_TYPE / PICKED_PRICE
-  local role=$1 min_c=$2 min_r=$3 preset=${4:-} list i row name cores ram disk price note sel
+pick_type() {  # pick_type <role> <min_cores> <min_ram_gb> <preset-or-empty> <name-prefix-or-empty> <strategy> → PICKED_TYPE / PICKED_PRICE
+  # strategy: "interactive" (prompt, or cheapest with --yes), "cheapest", "mid"
+  local role=$1 min_c=$2 min_r=$3 preset=${4:-} prefix=${5:-} strategy=${6:-interactive}
+  local list flist n mid i row name cores ram disk price note sel
   list=$(echo "$CANDIDATES" | awk -F'\t' -v c="$min_c" -v r="$min_r" '$2>=c && $3>=r')
   [ -n "$list" ] || err "no $role-capable types available in $LOC right now — try another location"
+  if [ -n "$prefix" ]; then
+    flist=$(echo "$list" | awk -v p="^$prefix" '$0 ~ p')
+    if [ -n "$flist" ]; then
+      list=$flist
+    else
+      echo "    (no ${prefix}* type meets ${min_c} vCPU / ${min_r} GB RAM in $LOC — falling back to all qualifying types)"
+    fi
+  fi
   if [ -n "$preset" ]; then
     row=$(echo "$list" | awk -F'\t' -v t="$preset" '$1==t')
     [ -n "$row" ] || err "$role type '$preset' not available in $LOC (or below ${min_c} vCPU / ${min_r} GB RAM)"
     echo "    $role type: $preset"
-  elif [ "$ASSUME_YES" = 1 ]; then
+  elif [ "$strategy" = "cheapest" ] || { [ "$strategy" = "interactive" ] && [ "$ASSUME_YES" = 1 ]; }; then
     row=$(echo "$list" | head -1)
     echo "    $role type: $(echo "$row" | cut -f1) (cheapest qualifying)"
+  elif [ "$strategy" = "mid" ]; then
+    n=$(echo "$list" | wc -l | tr -d ' ')
+    mid=$(( (n + 1) / 2 ))
+    row=$(echo "$list" | sed -n "${mid}p")
+    echo "    $role type: $(echo "$row" | cut -f1) (mid-range, $mid of $n qualifying types)"
   else
     echo
     echo "Available $role types in $LOC (OKD minimum: ${min_c} vCPU / ${min_r} GB RAM; >=100 GB disk recommended):"
@@ -283,12 +582,15 @@ LIST
 }
 
 # ── 2. topology & instance types ─────────────────────────────────────────
-if [ -n "$FLAG_MASTERS" ]; then MASTERS=$FLAG_MASTERS
-elif [ "$ASSUME_YES" = 1 ]; then MASTERS=3
-else printf '\nHow many MASTER nodes? [1]: '; read -r MASTERS; MASTERS=${MASTERS:-1}; fi
-if [ -n "$FLAG_WORKERS" ]; then WORKERS=$FLAG_WORKERS
-elif [ "$ASSUME_YES" = 1 ]; then WORKERS=3
-else printf 'How many WORKER nodes? [1]: '; read -r WORKERS; WORKERS=${WORKERS:-1}; fi
+# profiles 1-3 already set MASTERS/WORKERS; profile 4 (manual) prompts here
+if [ "$PROFILE" = 4 ]; then
+  if [ -n "$FLAG_MASTERS" ]; then MASTERS=$FLAG_MASTERS
+  elif [ "$ASSUME_YES" = 1 ]; then MASTERS=3
+  else printf '\nHow many MASTER nodes? [1]: '; read -r MASTERS; MASTERS=${MASTERS:-1}; fi
+  if [ -n "$FLAG_WORKERS" ]; then WORKERS=$FLAG_WORKERS
+  elif [ "$ASSUME_YES" = 1 ]; then WORKERS=3
+  else printf 'How many WORKER nodes? [1]: '; read -r WORKERS; WORKERS=${WORKERS:-1}; fi
+fi
 case "$MASTERS$WORKERS" in *[!0-9]*) err "counts must be numbers";; esac
 [ "$MASTERS" -ge 1 ] || err "at least 1 master required"
 
@@ -308,9 +610,9 @@ QUORUM
   [ "$QOK" = "y" ] || [ "$QOK" = "Y" ] || { echo "Aborted."; exit 0; }
 fi
 
-pick_type "master" 4 16 "$FLAG_MASTER_TYPE"
+pick_type "master" "$MIN_C_MASTER" "$MIN_R_MASTER" "$FLAG_MASTER_TYPE" "$TYPE_PREFIX" "$TYPE_STRATEGY"
 MASTER_TYPE=$PICKED_TYPE MASTER_PRICE=$PICKED_PRICE
-pick_type "worker" 2 8 "$FLAG_WORKER_TYPE"
+pick_type "worker" "$MIN_C_WORKER" "$MIN_R_WORKER" "$FLAG_WORKER_TYPE" "$TYPE_PREFIX" "$TYPE_STRATEGY"
 WORKER_TYPE=$PICKED_TYPE WORKER_PRICE=$PICKED_PRICE
 
 # bootstrap mirrors the master choice (temporary, deleted after bootstrap);
@@ -441,13 +743,7 @@ export $(grep -v '^#' .env | xargs)
 TOOLBOX=quay.io/slauger/hcloud-okd4:$OPENSHIFT_RELEASE
 DOMAIN=$TF_VAR_dns_domain
 
-# Refuse to deploy over an existing cluster — its nodes would not match the
-# freshly generated certs. Destroy first (./destroy-okd.sh).
-EXISTING=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
-  "https://api.hetzner.cloud/v1/servers" \
-  | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | endswith($d))] | length')
-[ "${EXISTING:-0}" = "0" ] \
-  || err "found $EXISTING server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first"
+# (existing-cluster / scale-up check already happened in step 0, above)
 
 # ── 6. toolbox image (fetch/build are the ONLY host-side make targets) ──
 step "Toolbox image" "skipped if cached, else 5-10 min download+build"
@@ -628,7 +924,13 @@ oc get nodes
 [ "${READY:-0}" -ge "$EXPECTED" ] || err "not all nodes became Ready — approve remaining CSRs manually: oc get csr"
 
 # ── 11b. schedule the teardown ───────────────────────────────────────────
-DEADLINE_TS=$(( $(date +%s) + $(awk -v h="$HOURS" 'BEGIN{printf "%d", h*3600}') ))
+AD_DUR=${FLAG_AUTODESTROY_AT:-$DUR}
+case "$AD_DUR" in
+  *m) AD_HOURS=$(awk -v m="${AD_DUR%m}" 'BEGIN{printf "%.4f", m/60}') ;;
+  *)  AD_HOURS=$AD_DUR ;;
+esac
+awk -v h="$AD_HOURS" 'BEGIN{exit !(h+0>0)}' || err "invalid --autodestroy-at: $FLAG_AUTODESTROY_AT"
+DEADLINE_TS=$(( $(date +%s) + $(awk -v h="$AD_HOURS" 'BEGIN{printf "%d", h*3600}') ))
 if [ "$(uname)" = "Darwin" ]; then
   DEADLINE_HUMAN=$(date -r "$DEADLINE_TS" '+%Y-%m-%d %H:%M')
 else
@@ -679,6 +981,38 @@ PLISTEOF
     else
       rm -f "$PLIST"
       AUTODESTROY_NOTE="auto-destroy : scheduling FAILED — run ./destroy-okd.sh manually by $DEADLINE_HUMAN"
+    fi
+  fi
+elif [ "$(uname)" = "Linux" ] && [ "$NO_AUTODESTROY" = 0 ]; then
+  if [ "$ASSUME_YES" = 1 ]; then SCHED=y
+  else
+    printf '\nSchedule auto-destroy at %s? [Y/n]: ' "$DEADLINE_HUMAN"
+    read -r SCHED; SCHED=${SCHED:-y}
+  fi
+  if [ "$SCHED" = "y" ] || [ "$SCHED" = "Y" ]; then
+    UNIT=hcloud-okd4-autodestroy
+    AD_SECONDS=$(( DEADLINE_TS - $(date +%s) ))
+    [ "$AD_SECONDS" -gt 0 ] || AD_SECONDS=60
+    # cancel any previous timer for this checkout first
+    systemctl --user stop "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1 || true
+    systemctl --user reset-failed "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1 || true
+    rm -f .autodestroy-atjob
+    if command -v systemd-run >/dev/null 2>&1 && systemd-run --user \
+        --unit="$UNIT" \
+        --on-active="${AD_SECONDS}s" \
+        bash -c "cd $PWD && HCLOUD_OKD4_SCHEDULED=1 ./destroy-okd.sh --yes >> autodestroy.log 2>&1" >/dev/null 2>&1; then
+      AUTODESTROY_NOTE="auto-destroy : scheduled for $DEADLINE_HUMAN via systemd --user timer ($UNIT.timer)
+  cancel with : systemctl --user stop $UNIT.timer $UNIT.service   (a manual ./destroy-okd.sh also cancels it)
+  NOTE: --user timers only fire while you are logged in, unless lingering is
+  enabled (sudo loginctl enable-linger \$USER)."
+    elif command -v at >/dev/null 2>&1 && AT_OUT=$(printf 'cd %s && HCLOUD_OKD4_SCHEDULED=1 ./destroy-okd.sh --yes >> autodestroy.log 2>&1\n' "$PWD" \
+        | at -M "now + $(( (AD_SECONDS + 59) / 60 )) minutes" 2>&1); then
+      AT_JOB=$(echo "$AT_OUT" | grep -oE 'job [0-9]+' | awk '{print $2}')
+      [ -n "$AT_JOB" ] && echo "$AT_JOB" > .autodestroy-atjob
+      AUTODESTROY_NOTE="auto-destroy : scheduled for $DEADLINE_HUMAN via 'at' (job ${AT_JOB:-?})
+  cancel with : atrm ${AT_JOB:-<job-id>}   (a manual ./destroy-okd.sh also cancels it)"
+    else
+      AUTODESTROY_NOTE="auto-destroy : scheduling FAILED (no systemd --user or at available) — run ./destroy-okd.sh manually by $DEADLINE_HUMAN"
     fi
   fi
 fi

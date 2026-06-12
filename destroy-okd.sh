@@ -31,6 +31,20 @@ if [ "$(uname)" = "Darwin" ] && [ -z "${HCLOUD_OKD4_SCHEDULED:-}" ]; then
   rm -f "$PLIST"
 fi
 
+UNIT=hcloud-okd4-autodestroy
+if [ "$(uname)" = "Linux" ] && [ -z "${HCLOUD_OKD4_SCHEDULED:-}" ]; then
+  if systemctl --user list-units --all "$UNIT.*" 2>/dev/null | grep -q "$UNIT"; then
+    log "Cancelling pending auto-destroy timer"
+    systemctl --user stop "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1 || true
+    systemctl --user reset-failed "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1 || true
+  fi
+  if [ -f .autodestroy-atjob ] && command -v atrm >/dev/null 2>&1; then
+    log "Cancelling pending auto-destroy 'at' job"
+    atrm "$(cat .autodestroy-atjob)" 2>/dev/null || true
+    rm -f .autodestroy-atjob
+  fi
+fi
+
 [ -f .env ] || err ".env not found"
 export $(grep -v '^#' .env | xargs)
 TOOLBOX=quay.io/slauger/hcloud-okd4:${OPENSHIFT_RELEASE:?OPENSHIFT_RELEASE missing from .env}
