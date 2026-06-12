@@ -74,10 +74,15 @@ step() {  # step "<title>" "<typical duration>"
 # Desktop's resolver, which negative-caches our DNS records after a
 # destroy/recreate cycle.
 tb() {
+  # the toolbox runs as root, so anything it writes into the bind-mounted
+  # workspace (manifests, ignition/auth/kubeconfig, terraform state, ...)
+  # would otherwise end up root-owned on the host; chown it back regardless
+  # of the command's exit status
   docker run --rm --dns 1.1.1.1 --env-file .env \
     -e ANSIBLE_PRIVATE_KEY_FILE=/workspace/okd4_new_id_rsa \
     -e TF_CLI_ARGS_apply=-auto-approve \
-    -v "$PWD":/workspace -w /workspace "$TOOLBOX" bash -c "$*"
+    -v "$PWD":/workspace -w /workspace "$TOOLBOX" \
+    bash -c "$*; rc=\$?; chown -R $(id -u):$(id -g) /workspace; exit \$rc"
 }
 
 flush_dns() {
