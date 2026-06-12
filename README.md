@@ -70,13 +70,19 @@ answer the prompts) to add or remove nodes on a live cluster.
   After scaling masters, check `oc get etcd -o jsonpath='{.status.conditions}'`
   and `oc -n openshift-etcd get pods`.
 
-### Monitoring & alerting
+### Monitoring, alerting & Grafana
 
 `deploy-okd.sh` can configure the OKD monitoring stack beyond its defaults:
 it enables **user-workload monitoring** (Prometheus/Thanos for your own
 projects, in addition to the platform metrics), sets Prometheus retention,
-and optionally routes warning/critical alerts to a webhook
-(`--alert-webhook <URL>`, e.g. a Slack/Teams incoming webhook).
+optionally routes warning/critical alerts to a webhook
+(`--alert-webhook <URL>`, e.g. a Slack/Teams incoming webhook), and deploys
+**Grafana** for visualization (OKD 4.16 no longer bundles it). Grafana runs
+in its own `grafana` namespace with a pre-provisioned datasource pointing at
+the cluster's Thanos querier — so dashboards can query both platform and
+user-workload metrics — and is exposed at `https://grafana.apps.<domain>`
+(admin credentials are printed when it's installed and kept in the
+`grafana-admin` secret).
 
 Because the extra stack is too heavy for minimal lab nodes, the option is
 **only available when at least one schedulable node has more than 12 GB
@@ -89,7 +95,10 @@ It can be installed at either point:
   cluster is detected, pick "Monitoring" from the menu, or run
   `./deploy-okd.sh --monitoring --yes` non-interactively.
 
-Once enabled, metrics and alerts are in the web console under **Observe**.
+Once enabled, metrics and alerts are in the web console under **Observe**,
+and Grafana is at `https://grafana.apps.<domain>` for custom dashboards
+(import any dashboard from grafana.com against the "OpenShift Prometheus"
+datasource).
 
 Notes:
 - `--yes` implies `--no-admin` (passwords can't be prompted non-interactively);

@@ -36,9 +36,9 @@ Usage: ./deploy-okd.sh [options]
   --rebuild-image   build the CoreOS snapshot even if one exists for this release
   --no-admin        skip the htpasswd admin step
   --monitoring      configure monitoring & alerting (user-workload monitoring,
-                    Alertmanager) — only available when at least one
-                    schedulable node has more than 12 GB RAM; works on a
-                    fresh deploy and on an already-running cluster
+                    Alertmanager, Grafana dashboards) — only available when
+                    at least one schedulable node has more than 12 GB RAM;
+                    works on a fresh deploy and on an already-running cluster
   --alert-webhook U send warning/critical alerts to webhook URL U
                     (Slack/Teams/generic; implies the Alertmanager config)
   --no-autodestroy  do not schedule the automatic teardown
@@ -236,6 +236,148 @@ AMEOF
   MONITORING_NOTE="monitoring  : user-workload monitoring + alerting enabled (console -> Observe)"
   [ -n "$ALERT_WEBHOOK" ] && MONITORING_NOTE="$MONITORING_NOTE
   alerts      : warning/critical routed to $ALERT_WEBHOOK"
+  install_grafana || MONITORING_NOTE="$MONITORING_NOTE
+  grafana     : install FAILED — check: oc -n grafana get pods"
+  return 0
+}
+
+install_grafana() {
+  # OKD 4.16 no longer bundles Grafana, so deploy the upstream image and
+  # point it at thanos-querier (platform + user-workload metrics) with a
+  # cluster-monitoring-view service-account token
+  log "Deploying Grafana for visualization"
+  oc get ns grafana >/dev/null 2>&1 || oc create namespace grafana
+  oc -n grafana create serviceaccount grafana --dry-run=client -o yaml | oc apply -f -
+  oc adm policy add-cluster-role-to-user cluster-monitoring-view -z grafana -n grafana >/dev/null
+  # a long-lived SA token secret (TokenRequest tokens expire within hours)
+  oc apply -f - <<'GTOK'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-sa-token
+  namespace: grafana
+  annotations:
+    kubernetes.io/service-account.name: grafana
+type: kubernetes.io/service-account-token
+GTOK
+  local token="" t=0 pass dstmp
+  until token=$(oc -n grafana get secret grafana-sa-token -o jsonpath='{.data.token}' 2>/dev/null | base64 -d) \
+        && [ -n "$token" ]; do
+    t=$((t+1))
+    [ $t -le 30 ] || { echo "    service-account token was not issued"; return 1; }
+    sleep 2
+  done
+  # admin password survives re-runs so existing logins keep working
+  if oc -n grafana get secret grafana-admin >/dev/null 2>&1; then
+    pass=$(oc -n grafana get secret grafana-admin -o jsonpath='{.data.password}' | base64 -d)
+  else
+    pass=$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | cut -c1-16)
+    oc -n grafana create secret generic grafana-admin --from-literal=password="$pass"
+  fi
+  dstmp=$(mktemp)
+  cat > "$dstmp" <<DSEOF
+apiVersion: 1
+datasources:
+- name: OpenShift Prometheus
+  type: prometheus
+  access: proxy
+  isDefault: true
+  url: https://thanos-querier.openshift-monitoring.svc.cluster.local:9091
+  jsonData:
+    httpHeaderName1: Authorization
+    tlsSkipVerify: true
+    timeInterval: 30s
+  secureJsonData:
+    httpHeaderValue1: Bearer $token
+DSEOF
+  oc -n grafana create configmap grafana-datasources --from-file=datasources.yaml="$dstmp" \
+    --dry-run=client -o yaml | oc apply -f -
+  rm -f "$dstmp"
+  oc apply -f - <<GRAFANA
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      serviceAccountName: grafana
+      containers:
+      - name: grafana
+        image: docker.io/grafana/grafana:11.6.0
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: GF_SECURITY_ADMIN_USER
+          value: admin
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-admin
+              key: password
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/grafana
+        - name: datasources
+          mountPath: /etc/grafana/provisioning/datasources
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: datasources
+        configMap:
+          name: grafana-datasources
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: grafana
+spec:
+  selector:
+    app: grafana
+  ports:
+  - port: 3000
+    targetPort: 3000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: grafana
+  namespace: grafana
+spec:
+  host: grafana.apps.$DOMAIN
+  to:
+    kind: Service
+    name: grafana
+  port:
+    targetPort: 3000
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+GRAFANA
+  oc -n grafana rollout status deploy/grafana --timeout=300s \
+    || { echo "    Grafana did not become ready — check: oc -n grafana get pods"; return 1; }
+  MONITORING_NOTE="$MONITORING_NOTE
+  grafana     : https://grafana.apps.$DOMAIN  (user: admin, password: $pass)"
   return 0
 }
 
@@ -325,7 +467,7 @@ if [ "${EXISTING_SERVERS:-0}" -gt 0 ] 2>/dev/null; then
     echo "  1) Scale — add or remove masters/workers on this cluster"
     MON_MAX_GB=$(KUBECONFIG=$PWD/ignition/auth/kubeconfig max_node_ram_gb 2>/dev/null || echo 0)
     if awk -v g="${MON_MAX_GB:-0}" 'BEGIN{exit !(g+0>12)}'; then
-      echo "  2) Monitoring — configure monitoring & alerting (largest node: ${MON_MAX_GB} GB RAM)"
+      echo "  2) Monitoring — configure monitoring, alerting & Grafana (largest node: ${MON_MAX_GB} GB RAM)"
     else
       echo "  2) Monitoring — UNAVAILABLE (needs a node with >12 GB RAM, largest is ${MON_MAX_GB:-0} GB)"
     fi
