@@ -70,6 +70,27 @@ answer the prompts) to add or remove nodes on a live cluster.
   After scaling masters, check `oc get etcd -o jsonpath='{.status.conditions}'`
   and `oc -n openshift-etcd get pods`.
 
+### Monitoring & alerting
+
+`deploy-okd.sh` can configure the OKD monitoring stack beyond its defaults:
+it enables **user-workload monitoring** (Prometheus/Thanos for your own
+projects, in addition to the platform metrics), sets Prometheus retention,
+and optionally routes warning/critical alerts to a webhook
+(`--alert-webhook <URL>`, e.g. a Slack/Teams incoming webhook).
+
+Because the extra stack is too heavy for minimal lab nodes, the option is
+**only available when at least one schedulable node has more than 12 GB
+RAM** — otherwise it is hidden from the menus and skipped with a warning.
+
+It can be installed at either point:
+- **During a deploy** — answer `y` at the "Configure monitoring & alerting?"
+  prompt after the cluster is up, or pass `--monitoring` (works with `--yes`).
+- **On a running cluster** — re-run `./deploy-okd.sh`: when an existing
+  cluster is detected, pick "Monitoring" from the menu, or run
+  `./deploy-okd.sh --monitoring --yes` non-interactively.
+
+Once enabled, metrics and alerts are in the web console under **Observe**.
+
 Notes:
 - `--yes` implies `--no-admin` (passwords can't be prompted non-interactively);
   the cluster is left on the `kubeadmin` credentials printed in the summary.

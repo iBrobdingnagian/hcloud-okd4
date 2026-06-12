@@ -35,6 +35,12 @@ Usage: ./deploy-okd.sh [options]
   --release R       OKD line (4.16) or full tag (4.16.0-okd-scos.1)
   --rebuild-image   build the CoreOS snapshot even if one exists for this release
   --no-admin        skip the htpasswd admin step
+  --monitoring      configure monitoring & alerting (user-workload monitoring,
+                    Alertmanager) — only available when at least one
+                    schedulable node has more than 12 GB RAM; works on a
+                    fresh deploy and on an already-running cluster
+  --alert-webhook U send warning/critical alerts to webhook URL U
+                    (Slack/Teams/generic; implies the Alertmanager config)
   --no-autodestroy  do not schedule the automatic teardown
   --autodestroy-at D schedule auto-destroy after D (hours or Nm minutes,
                     same syntax as --duration); defaults to --duration
@@ -49,6 +55,7 @@ USAGE
 FLAG_REGION="" FLAG_MASTERS="" FLAG_WORKERS="" FLAG_MASTER_TYPE="" FLAG_WORKER_TYPE=""
 FLAG_DURATION="" FLAG_RELEASE="" REBUILD_IMAGE=0 NO_ADMIN=0 NO_AUTODESTROY=0 ASSUME_YES=0
 FLAG_PROFILE="" FLAG_LAB_TOPOLOGY="" FLAG_LAB_TIER="" FLAG_AUTODESTROY_AT="" FLAG_SCALE=0
+FLAG_MONITORING=0 ALERT_WEBHOOK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --region)         FLAG_REGION=${2:?--region needs a value}; shift 2 ;;
@@ -64,6 +71,8 @@ while [ $# -gt 0 ]; do
     --release)        FLAG_RELEASE=${2:?--release needs a value}; shift 2 ;;
     --rebuild-image)  REBUILD_IMAGE=1; shift ;;
     --no-admin)       NO_ADMIN=1; shift ;;
+    --monitoring)     FLAG_MONITORING=1; shift ;;
+    --alert-webhook)  ALERT_WEBHOOK=${2:?--alert-webhook needs a URL}; FLAG_MONITORING=1; shift 2 ;;
     --no-autodestroy) NO_AUTODESTROY=1; shift ;;
     --scale)          FLAG_SCALE=1; shift ;;
     --yes)            ASSUME_YES=1; NO_ADMIN=1; shift ;;  # passwords can't be prompted non-interactively
@@ -129,6 +138,105 @@ flush_dns() {
       fi
       ;;
   esac
+}
+
+# ── monitoring & alerting (user-workload monitoring + Alertmanager) ─────
+# The full stack (extra Prometheus pair, Thanos ruler) is too heavy for
+# minimal lab nodes, so it is gated: at least one schedulable node must
+# have MORE than 12 GB RAM. Works during a deploy and on a running cluster.
+MONITORING_NOTE="monitoring  : not configured (re-run ./deploy-okd.sh --monitoring to add it)"
+
+max_node_ram_gb() {  # largest memory capacity (GB, integer) among schedulable Ready nodes
+  oc get nodes -o json 2>/dev/null | jq -r '
+    [ .items[]
+      | select(.spec.unschedulable != true)
+      | .status.capacity.memory
+      | capture("(?<n>[0-9]+)(?<u>[A-Za-z]*)")
+      | (.n | tonumber) * (if   .u == "Ki" then 1 / 1048576
+                           elif .u == "Mi" then 1 / 1024
+                           elif .u == "Gi" then 1
+                           else 1 / 1073741824 end)
+    ] | max // 0 | floor'
+}
+
+install_monitoring() {
+  export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+  [ -f "$KUBECONFIG" ] || { echo "    no kubeconfig at $KUBECONFIG — cannot configure monitoring"; return 1; }
+  local max_gb t
+  max_gb=$(max_node_ram_gb)
+  if ! awk -v g="${max_gb:-0}" 'BEGIN{exit !(g+0>12)}'; then
+    echo "    monitoring needs a node with more than 12 GB RAM — largest schedulable node has ${max_gb:-0} GB; skipping"
+    MONITORING_NOTE="monitoring  : SKIPPED (needs a node with >12 GB RAM, largest is ${max_gb:-0} GB)"
+    return 1
+  fi
+  log "Configuring monitoring & alerting (largest node: ${max_gb} GB RAM)"
+  oc apply -f - <<'MONEOF'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    enableUserWorkload: true
+    alertmanagerMain:
+      enableUserAlertmanagerConfig: true
+    prometheusK8s:
+      retention: 24h
+MONEOF
+
+  if [ -z "$ALERT_WEBHOOK" ] && [ "$ASSUME_YES" = 0 ]; then
+    printf 'Alertmanager webhook URL for warning/critical alerts (Slack/Teams/generic; empty to skip): '
+    read -r ALERT_WEBHOOK
+  fi
+  if [ -n "$ALERT_WEBHOOK" ]; then
+    echo "    routing warning/critical alerts to $ALERT_WEBHOOK"
+    local amtmp
+    amtmp=$(mktemp)
+    cat > "$amtmp" <<AMEOF
+global:
+  resolve_timeout: 5m
+route:
+  group_by: ['namespace']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: default
+  routes:
+  - receiver: watchdog
+    matchers:
+    - alertname = Watchdog
+  - receiver: webhook
+    matchers:
+    - severity =~ "warning|critical"
+receivers:
+- name: default
+- name: watchdog
+- name: webhook
+  webhook_configs:
+  - url: '$ALERT_WEBHOOK'
+AMEOF
+    oc -n openshift-monitoring create secret generic alertmanager-main \
+      --from-file=alertmanager.yaml="$amtmp" --dry-run=client -o yaml | oc replace -f -
+    rm -f "$amtmp"
+  fi
+
+  echo "    waiting for the user-workload monitoring stack (1-3 min typical)"
+  t=0
+  until [ "$(oc -n openshift-user-workload-monitoring get pods --no-headers 2>/dev/null \
+             | awk '$3=="Running"' | wc -l | tr -d ' ')" -ge 3 ]; do
+    t=$((t+1))
+    if [ $t -gt 30 ]; then
+      echo "    still starting — check later with: oc -n openshift-user-workload-monitoring get pods"
+      break
+    fi
+    sleep 10
+  done
+  oc -n openshift-user-workload-monitoring get pods 2>/dev/null || true
+  MONITORING_NOTE="monitoring  : user-workload monitoring + alerting enabled (console -> Observe)"
+  [ -n "$ALERT_WEBHOOK" ] && MONITORING_NOTE="$MONITORING_NOTE
+  alerts      : warning/critical routed to $ALERT_WEBHOOK"
+  return 0
 }
 
 # ── pre-flight checks ────────────────────────────────────────────────────
@@ -205,15 +313,31 @@ if [ "${EXISTING_SERVERS:-0}" -gt 0 ] 2>/dev/null; then
   DO_SCALE=0
   if [ "$FLAG_SCALE" = 1 ]; then
     DO_SCALE=1
+  elif [ "$FLAG_MONITORING" = 1 ]; then
+    # configure monitoring on the already-running cluster, nothing else
+    install_monitoring || exit 1
+    log "Done: $MONITORING_NOTE"
+    exit 0
   elif [ "$ASSUME_YES" = 1 ]; then
-    err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale to add/remove nodes"
+    err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale / --monitoring"
   else
     echo
     echo "  1) Scale — add or remove masters/workers on this cluster"
-    echo "  2) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
-    printf 'Selection [2]: '
-    read -r SCSEL; SCSEL=${SCSEL:-2}
-    [ "$SCSEL" = "1" ] && DO_SCALE=1
+    MON_MAX_GB=$(KUBECONFIG=$PWD/ignition/auth/kubeconfig max_node_ram_gb 2>/dev/null || echo 0)
+    if awk -v g="${MON_MAX_GB:-0}" 'BEGIN{exit !(g+0>12)}'; then
+      echo "  2) Monitoring — configure monitoring & alerting (largest node: ${MON_MAX_GB} GB RAM)"
+    else
+      echo "  2) Monitoring — UNAVAILABLE (needs a node with >12 GB RAM, largest is ${MON_MAX_GB:-0} GB)"
+    fi
+    echo "  3) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
+    printf 'Selection [3]: '
+    read -r SCSEL; SCSEL=${SCSEL:-3}
+    case "$SCSEL" in
+      1) DO_SCALE=1 ;;
+      2) install_monitoring || exit 1
+         log "Done: $MONITORING_NOTE"
+         exit 0 ;;
+    esac
   fi
 
   if [ "$DO_SCALE" = 0 ]; then
@@ -1080,6 +1204,24 @@ if [ "$NO_ADMIN" = 0 ]; then
   fi
 fi
 
+# ── 11d. monitoring & alerting (optional, gated on >12 GB RAM nodes) ─────
+if [ "$FLAG_MONITORING" = 1 ]; then
+  install_monitoring || true
+elif [ "$ASSUME_YES" = 0 ]; then
+  MON_MAX_GB=$(max_node_ram_gb)
+  if awk -v g="${MON_MAX_GB:-0}" 'BEGIN{exit !(g+0>12)}'; then
+    printf '\nConfigure monitoring & alerting (user-workload monitoring; largest node %s GB RAM)? [y/N]: ' "$MON_MAX_GB"
+    read -r MKMON
+    if [ "$MKMON" = "y" ] || [ "$MKMON" = "Y" ]; then
+      install_monitoring || true
+    fi
+  else
+    echo
+    echo "    (monitoring & alerting not offered: needs a node with >12 GB RAM, largest is ${MON_MAX_GB:-0} GB —"
+    echo "     it can be added later with ./deploy-okd.sh --monitoring after scaling to bigger nodes)"
+  fi
+fi
+
 # ── 12. summary ──────────────────────────────────────────────────────────
 KUBEADMIN_PW=$(cat ignition/auth/kubeadmin-password)
 if [ -n "$ADMIN_CREATED" ]; then
@@ -1104,6 +1246,7 @@ cat <<SUMMARY
   SSH         : ssh -i okd4_new_id_rsa core@<node-ip>
 
   $AUTODESTROY_NOTE
+  $MONITORING_NOTE
 SUMMARY
 if [ -z "$ADMIN_CREATED" ]; then
 cat <<'HOWTO'
