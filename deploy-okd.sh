@@ -112,6 +112,27 @@ flush_dns() {
 }
 
 # ── pre-flight checks ────────────────────────────────────────────────────
+fix_oc_path() {
+  # On Linux hosts with k3s installed, /usr/local/bin/oc is often a symlink
+  # to k3s (a kubectl shim), which shadows the real OpenShift CLI and causes
+  # errors like "No help topic for 'login'". If the real oc is installed
+  # under ~/.local/bin, make sure it comes first in PATH — both for this
+  # run and persistently for future shells (bash and zsh).
+  [ "$(uname)" = "Linux" ] || return 0
+  local real_oc="$HOME/.local/bin/oc"
+  [ -x "$real_oc" ] || return 0
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+  if [ "$(command -v oc 2>/dev/null)" != "$real_oc" ]; then
+    log "Fixing PATH so the real oc ($real_oc) takes priority over $(command -v oc 2>/dev/null)"
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+      [ -f "$rc" ] || continue
+      grep -qF 'export PATH="$HOME/.local/bin:$PATH"' "$rc" || \
+        printf '\n# added by deploy-okd.sh: keep the real oc ahead of any k3s-provided oc shim\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rc"
+    done
+  fi
+}
+fix_oc_path
+
 command -v docker >/dev/null || err "docker is required"
 if ! docker info >/dev/null 2>&1; then
   log "Docker daemon is not running — starting it"

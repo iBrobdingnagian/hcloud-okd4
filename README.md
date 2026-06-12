@@ -42,6 +42,12 @@ Notes:
 - New OpenShift nodes periodically submit fresh serving-cert CSRs; on
   platform "none" nothing approves them automatically. Run `make sign_csr`
   (or repeat step 11 below) until `oc get csr` shows nothing pending.
+- On Linux hosts with k3s installed, `/usr/local/bin/oc` is often a symlink
+  to k3s, which shadows the real OpenShift CLI and causes errors like
+  `error: No help topic for 'login'`. `deploy-okd.sh` detects this and, if
+  the real `oc` is installed under `~/.local/bin`, fixes `PATH` for the
+  current run and persists the fix to `~/.bashrc` and `~/.zshrc` (open a new
+  shell, or `exec $SHELL`, for it to take effect there).
 
 ---
 
