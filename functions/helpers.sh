@@ -42,7 +42,20 @@ tb() {
 }
 
 flush_dns() {
-  # the OS caches the records' absence from before terraform created them
+  # the OS caches the records' absence from before terraform created them.
+  # sudo may need a password; an unattended deploy must NOT hang on the
+  # prompt (one run sat there for ~1h) — give the user 60s, then skip the
+  # flush and continue. Skipping is harmless: the records are correct, the
+  # local cache just takes a few extra minutes to expire.
+  if ! sudo -n true 2>/dev/null && command -v timeout >/dev/null 2>&1; then
+    echo
+    echo "    The DNS cache flush needs your sudo password — 60s to enter it,"
+    echo "    otherwise the flush is SKIPPED and the deploy continues."
+    if ! timeout --foreground 60 sudo -v; then
+      echo "    no password within 60s — skipping the DNS cache flush"
+      return 0
+    fi
+  fi
   case "$(uname)" in
     Darwin)
       log "Flushing macOS DNS cache (sudo may prompt for your password)"

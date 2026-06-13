@@ -53,12 +53,22 @@ handle_existing_cluster() {
   fi
 
   # ── scale flow (up and/or down) ─────────────────────────────────────
-  if [ -n "$FLAG_WORKERS" ]; then NEW_WORKERS=$FLAG_WORKERS
-  elif [ "$ASSUME_YES" = 1 ]; then NEW_WORKERS=$CUR_WORKERS
-  else printf 'New TOTAL worker count [%d]: ' "$CUR_WORKERS"; read -r NEW_WORKERS; NEW_WORKERS=${NEW_WORKERS:-$CUR_WORKERS}; fi
-  if [ -n "$FLAG_MASTERS" ]; then NEW_MASTERS=$FLAG_MASTERS
-  elif [ "$ASSUME_YES" = 1 ]; then NEW_MASTERS=$CUR_MASTERS
-  else printf 'New TOTAL master count [%d]: ' "$CUR_MASTERS"; read -r NEW_MASTERS; NEW_MASTERS=${NEW_MASTERS:-$CUR_MASTERS}; fi
+  # If the user passed --workers and/or --masters, take those verbatim and
+  # KEEP the other dimension unchanged WITHOUT prompting — `--scale
+  # --workers 4` must mean "workers->4, masters untouched", never ask about
+  # masters. Only prompt for a value when NEITHER flag was given (fully
+  # interactive scale).
+  if [ -n "$FLAG_WORKERS" ] || [ -n "$FLAG_MASTERS" ]; then
+    NEW_WORKERS=${FLAG_WORKERS:-$CUR_WORKERS}
+    NEW_MASTERS=${FLAG_MASTERS:-$CUR_MASTERS}
+    echo "    workers: $CUR_WORKERS -> $NEW_WORKERS$([ -z "$FLAG_WORKERS" ] && echo '  (unchanged)')"
+    echo "    masters: $CUR_MASTERS -> $NEW_MASTERS$([ -z "$FLAG_MASTERS" ] && echo '  (unchanged)')"
+  elif [ "$ASSUME_YES" = 1 ]; then
+    NEW_WORKERS=$CUR_WORKERS NEW_MASTERS=$CUR_MASTERS
+  else
+    printf 'New TOTAL worker count [Enter = keep %d]: ' "$CUR_WORKERS"; read -r NEW_WORKERS; NEW_WORKERS=${NEW_WORKERS:-$CUR_WORKERS}
+    printf 'New TOTAL master count [Enter = keep %d]: ' "$CUR_MASTERS"; read -r NEW_MASTERS; NEW_MASTERS=${NEW_MASTERS:-$CUR_MASTERS}
+  fi
   case "$NEW_MASTERS$NEW_WORKERS" in *[!0-9]*) err "counts must be numbers";; esac
   [ "$NEW_WORKERS" -ge 0 ] || err "worker count cannot be negative"
   [ "$NEW_MASTERS" -ge 1 ] || err "at least 1 master required"
