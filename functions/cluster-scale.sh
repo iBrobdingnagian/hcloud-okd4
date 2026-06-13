@@ -6,7 +6,23 @@
 handle_existing_cluster() {
   CUR_MASTERS=${TF_VAR_replicas_master:-0}
   CUR_WORKERS=${TF_VAR_replicas_worker:-0}
-  log "Found $EXISTING_SERVERS existing server(s) for $DOMAIN (currently $CUR_MASTERS master(s) / $CUR_WORKERS worker(s) in .env)"
+
+  # SAFETY: the scale math trusts CUR_MASTERS/CUR_WORKERS as "what is running",
+  # but those come from .env and can drift from reality (a half-finished
+  # deploy, a manual change, a different checkout). If they disagree with the
+  # live Hetzner inventory, terraform would create/DESTROY nodes to match the
+  # stale number — including control-plane nodes. Count the real servers and
+  # reconcile before doing anything.
+  local real_m real_w srv_json
+  srv_json=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" "https://api.hetzner.cloud/v1/servers")
+  real_m=$(echo "$srv_json" | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | test("^master[0-9]+\\." + $d))] | length')
+  real_w=$(echo "$srv_json" | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | test("^worker[0-9]+\\." + $d))] | length')
+  if [ "${real_m:-0}" != "$CUR_MASTERS" ] || [ "${real_w:-0}" != "$CUR_WORKERS" ]; then
+    log "NOTE: .env says $CUR_MASTERS master(s)/$CUR_WORKERS worker(s) but Hetzner actually has $real_m master(s)/$real_w worker(s) — using the live counts"
+    CUR_MASTERS=$real_m
+    CUR_WORKERS=$real_w
+  fi
+  log "Found $EXISTING_SERVERS existing server(s) for $DOMAIN (currently $CUR_MASTERS master(s) / $CUR_WORKERS worker(s))"
 
   DO_SCALE=0
   if [ "$FLAG_SCALE" = 1 ]; then
