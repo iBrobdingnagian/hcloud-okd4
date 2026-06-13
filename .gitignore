@@ -15,6 +15,7 @@ openshift-client-linux-*.tar.gz
 okd4_new_id_rsa
 okd4_new_id_rsa.pub
 ignition-auth-backup-*
+users.htpasswd
 autodestroy.log
 .autodestroy-atjob
 logs/
