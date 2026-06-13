@@ -16,6 +16,8 @@ okd4_new_id_rsa
 okd4_new_id_rsa.pub
 ignition-auth-backup-*
 users.htpasswd
+*.htpasswd
+.htpasswd
 autodestroy.log
 .autodestroy-atjob
 logs/
