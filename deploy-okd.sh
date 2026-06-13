@@ -44,11 +44,29 @@ Usage: ./deploy-okd.sh [options]
                     works on a fresh deploy and on an already-running cluster
   --alert-webhook U send warning/critical alerts to webhook URL U
                     (Slack/Teams/generic; implies the Alertmanager config)
+  --devops          install DevOps tooling on the running cluster (interactive
+                    menu, or use --devops-components). Works on a fresh deploy
+                    and on an already-running cluster.
+  --devops-components LIST  comma list of: cert-manager,argocd,jenkins,gitlab
+  --storage-backend B  storageclass backend for components needing PVCs:
+                      local (node volumes, default) or smb (Hetzner Storage Box)
+  --version-policy P  operator version policy: n-2 (default; install two
+                      releases behind the channel head for stability) or
+                      latest (track the channel head)
   --no-autodestroy  do not schedule the automatic teardown
   --autodestroy-at D schedule auto-destroy after D (hours or Nm minutes,
                     same syntax as --duration); defaults to --duration
   --scale           if an existing cluster is found, offer to add masters/
                     workers to it instead of refusing to proceed
+  --autoscale       run a load-driven worker autoscaler against the running
+                    cluster (foreground watch loop; Ctrl-C to stop). Adds a
+                    worker when pods are Pending for cpu/memory, removes one
+                    when load fits on fewer workers. Workers only.
+                    NOTE: native MachineSets/MachineAutoscaler can't run on
+                    Hetzner (platform "none"); this drives the --scale path.
+  --autoscale-min N   floor for worker count (default: current)
+  --autoscale-max N   ceiling for worker count (default: current + 2)
+  --autoscale-interval S  poll interval in seconds (default 60, min 15)
   --yes             non-interactive: defaults for everything not given above
                     (profile 2: 3 masters, 3 workers, current region,
                     cheapest types, 8h)
@@ -59,6 +77,9 @@ FLAG_REGION="" FLAG_MASTERS="" FLAG_WORKERS="" FLAG_MASTER_TYPE="" FLAG_WORKER_T
 FLAG_DURATION="" FLAG_RELEASE="" REBUILD_IMAGE=0 NO_ADMIN=0 NO_AUTODESTROY=0 ASSUME_YES=0
 FLAG_PROFILE="" FLAG_LAB_TOPOLOGY="" FLAG_LAB_TIER="" FLAG_AUTODESTROY_AT="" FLAG_SCALE=0
 FLAG_MONITORING=0 ALERT_WEBHOOK="" FLAG_ADMIN=0
+FLAG_AUTOSCALE=0 FLAG_AUTOSCALE_MIN="" FLAG_AUTOSCALE_MAX="" FLAG_AUTOSCALE_INTERVAL=""
+FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
+VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
     --region)         FLAG_REGION=${2:?--region needs a value}; shift 2 ;;
@@ -77,8 +98,16 @@ while [ $# -gt 0 ]; do
     --admin)          FLAG_ADMIN=1; shift ;;
     --monitoring)     FLAG_MONITORING=1; shift ;;
     --alert-webhook)  ALERT_WEBHOOK=${2:?--alert-webhook needs a URL}; FLAG_MONITORING=1; shift 2 ;;
+    --devops)             FLAG_DEVOPS=1; shift ;;
+    --devops-components)  FLAG_DEVOPS_COMPONENTS=${2:?--devops-components needs a value}; FLAG_DEVOPS=1; shift 2 ;;
+    --storage-backend)    FLAG_STORAGE_BACKEND=${2:?--storage-backend needs a value}; shift 2 ;;
+    --version-policy)     VERSION_POLICY=${2:?--version-policy needs a value}; shift 2 ;;
     --no-autodestroy) NO_AUTODESTROY=1; shift ;;
     --scale)          FLAG_SCALE=1; shift ;;
+    --autoscale)          FLAG_AUTOSCALE=1; shift ;;
+    --autoscale-min)      FLAG_AUTOSCALE_MIN=${2:?--autoscale-min needs a value}; shift 2 ;;
+    --autoscale-max)      FLAG_AUTOSCALE_MAX=${2:?--autoscale-max needs a value}; shift 2 ;;
+    --autoscale-interval) FLAG_AUTOSCALE_INTERVAL=${2:?--autoscale-interval needs a value}; shift 2 ;;
     --yes)            ASSUME_YES=1; NO_ADMIN=1; shift ;;  # passwords can't be prompted non-interactively
     --help)           usage; exit 0 ;;
     *)                usage; err "unknown option: $1" ;;
@@ -97,6 +126,14 @@ if [ -n "$DOMAIN" ]; then
     | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | endswith("." + $d))] | length')
 else
   EXISTING_SERVERS=0
+fi
+
+# ── 0. autoscaler mode: a foreground watch loop against a running cluster ─
+if [ "$FLAG_AUTOSCALE" = 1 ]; then
+  [ "${EXISTING_SERVERS:-0}" -gt 0 ] 2>/dev/null \
+    || err "--autoscale needs a running cluster for $DOMAIN, found none — deploy one first"
+  run_autoscale            # functions/autoscale.sh — loops until Ctrl-C
+  exit 0
 fi
 
 # ── 0. existing cluster? offer scale / monitoring instead of a deploy ────
@@ -141,8 +178,17 @@ fi
 
 pick_type "master" "$MIN_C_MASTER" "$MIN_R_MASTER" "$FLAG_MASTER_TYPE" "$TYPE_PREFIX" "$TYPE_STRATEGY"
 MASTER_TYPE=$PICKED_TYPE MASTER_PRICE=$PICKED_PRICE
-pick_type "worker" "$MIN_C_WORKER" "$MIN_R_WORKER" "$FLAG_WORKER_TYPE" "$TYPE_PREFIX" "$TYPE_STRATEGY"
-WORKER_TYPE=$PICKED_TYPE WORKER_PRICE=$PICKED_PRICE
+if [ "$WORKERS" -gt 0 ]; then
+  pick_type "worker" "$MIN_C_WORKER" "$MIN_R_WORKER" "$FLAG_WORKER_TYPE" "$TYPE_PREFIX" "$TYPE_STRATEGY"
+  WORKER_TYPE=$PICKED_TYPE WORKER_PRICE=$PICKED_PRICE
+else
+  # single-node topology (0 workers): the master is schedulable (compute
+  # replicas stay 0), so the cluster needs no worker VMs. Terraform still
+  # needs a valid worker type for the zero-replica pool — reuse the master
+  # type and charge nothing. Add workers later with: ./deploy-okd.sh --scale
+  WORKER_TYPE=$MASTER_TYPE WORKER_PRICE=0
+  echo "    worker nodes: 0 (single-node — master is schedulable; scale up later with --scale)"
+fi
 
 # bootstrap mirrors the master choice (temporary, deleted after bootstrap);
 # ignition gets the cheapest available type (it only serves one file)
@@ -389,6 +435,17 @@ elif [ "$ASSUME_YES" = 0 ]; then
   fi
 fi
 
+# ── 11e. DevOps tooling (optional: ArgoCD / Jenkins / GitLab) ────────────
+if [ "$FLAG_DEVOPS" = 1 ]; then
+  install_devops || true
+elif [ "$ASSUME_YES" = 0 ]; then
+  printf '\nInstall DevOps tooling (ArgoCD / Jenkins / GitLab)? [y/N]: '
+  read -r MKDEV
+  if [ "$MKDEV" = "y" ] || [ "$MKDEV" = "Y" ]; then
+    install_devops || true
+  fi
+fi
+
 # ── 12. summary ──────────────────────────────────────────────────────────
 KUBEADMIN_PW=$(cat ignition/auth/kubeadmin-password)
 if [ -n "$ADMIN_CREATED" ]; then
@@ -413,7 +470,8 @@ cat <<SUMMARY
   SSH         : ssh -i okd4_new_id_rsa core@<node-ip>
 
   $AUTODESTROY_NOTE
-  $MONITORING_NOTE
+  $MONITORING_NOTE${DEVOPS_NOTE:+
+  $DEVOPS_NOTE}
 SUMMARY
 if [ -z "$ADMIN_CREATED" ]; then
 cat <<'HOWTO'

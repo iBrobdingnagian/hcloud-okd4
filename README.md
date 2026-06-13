@@ -70,6 +70,38 @@ answer the prompts) to add or remove nodes on a live cluster.
   After scaling masters, check `oc get etcd -o jsonpath='{.status.conditions}'`
   and `oc -n openshift-etcd get pods`.
 
+#### Load-driven autoscaling (`--autoscale`)
+
+This cluster is `platform: none`, so OpenShift's native **MachineSets /
+MachineAutoscaler / ClusterAutoscaler don't work** — there is no Hetzner
+machine-api actuator, and `MachineSet` objects never reconcile into real
+servers (that's exactly why nodes are created with Terraform and joined via
+CSR approval). The *Compute → Machines / MachineSets / MachineAutoscalers*
+entries in the web console are therefore always empty here.
+
+`./deploy-okd.sh --autoscale` re-creates the **behavior** of a MachineAutoscaler
+on top of the existing scaling path: it runs a foreground watch loop (Ctrl-C to
+stop) that polls the cluster and, **workers only**:
+
+- **scales up** (adds one worker) when a pod is `Pending`/`Unschedulable`
+  because of `Insufficient cpu`/`memory` — i.e. load that more identical
+  workers can actually fix (taint/affinity/nodeSelector mismatches are ignored);
+- **scales down** (removes one worker) when current pod requests would still
+  fit under a utilisation threshold on one fewer worker, held for several
+  consecutive polls to avoid flapping;
+- never shrinks while any pod is stuck unschedulable, and stays within
+  `--autoscale-min`/`--autoscale-max` (defaults: current count … current + 2).
+
+Each action goes through the same Terraform + drain + CSR path as a manual
+`--scale`, so it is just as safe. Flags: `--autoscale-min N`,
+`--autoscale-max N`, `--autoscale-interval S` (seconds, default 60, min 15).
+
+```bash
+# add load in another terminal, e.g. a Deployment with big CPU requests / many
+# replicas, then watch workers grow up to the max and shrink back when idle:
+./deploy-okd.sh --autoscale --autoscale-min 1 --autoscale-max 4 --autoscale-interval 30
+```
+
 ### Monitoring, alerting & Grafana
 
 `deploy-okd.sh` can configure the OKD monitoring stack beyond its defaults:
@@ -115,6 +147,17 @@ into the matching folder):
   traffic, TCP retransmits, conntrack usage.
 - **Storage** — disk throughput/IOPS/saturation, filesystem and inode
   usage, PVC usage.
+- **ONZACK** — two community dashboards (*Cluster Monitoring* and *Namespace
+  Monitoring*) from [onzack/grafana-dashboards](https://github.com/onzack/grafana-dashboards),
+  vendored under `grafana/vendor/onzack/`. The *without-recording-rules*
+  variants are used: they run their queries inline against the Thanos querier
+  (which federates platform + user-workload metrics), so they need no extra
+  `PrometheusRule`. The upstream recording-rules variant cannot populate on
+  OKD's split monitoring stack (custom rules are evaluated by the
+  user-workload Prometheus, which never scrapes node-exporter/kube-state-metrics);
+  the rules are kept under `grafana/vendor/onzack/rules/` for reference only.
+  Because `gen-dashboards.py` regenerates (and wipes) `grafana/dashboards/`,
+  vendored third-party dashboards live outside that tree.
 
 Once enabled, metrics and alerts are in the web console under **Observe**,
 and Grafana is at `https://grafana.apps.<domain>` (you can also import any
@@ -138,6 +181,50 @@ Notes:
   the real `oc` is installed under `~/.local/bin`, fixes `PATH` for the
   current run and persists the fix to `~/.bashrc` and `~/.zshrc` (open a new
   shell, or `exec $SHELL`, for it to take effect there).
+
+---
+
+### DevOps tooling (`--devops`)
+
+`deploy-okd.sh` can install CI/CD & GitOps tooling on the running cluster —
+interactively (a prompt after the cluster is up, or the "DevOps" entry in the
+existing-cluster menu) or non-interactively with `--devops` /
+`--devops-components argocd,jenkins,gitlab`. Where an OperatorHub operator
+exists in the cluster's catalog it is used; otherwise a bundled template.
+
+| Component | How it's installed | Login |
+|-----------|--------------------|-------|
+| **cert-manager** | `cert-manager` Subscription (channel `stable`, into `openshift-operators`) + a self-signed `ClusterIssuer` | n/a (cluster service) |
+| **ArgoCD** | `argocd-operator` Subscription (channel `alpha`, into `openshift-operators` — it only supports AllNamespaces) + an `ArgoCD` CR that enables a reencrypt Route | `admin` / secret `argocd-cluster` (printed in the summary) |
+| **Jenkins** | the OpenShift Jenkins image run as a plain Deployment (no Jenkins operator in the catalog; the bundled DeploymentConfig template is deprecated/unreliable on 4.16) | **your OpenShift account** — the image's OAuth login plugin (`OPENSHIFT_ENABLE_OAUTH`) + the SA's `oauth-redirectreference` |
+| **GitLab** | `gitlab-operator-kubernetes` Subscription (channel `stable`, own-namespace — it only supports OwnNamespace) + a `GitLab` CR | `root` / secret `gitlab-gitlab-initial-root-password` |
+
+**Version policy (`--version-policy`, default `n-2`):** operators are pinned
+**two releases behind the channel head** for stability, not the bleeding edge.
+The Subscription gets `startingCSV: <N-2>` and `installPlanApproval: Manual`
+(Manual is what *keeps* it on N-2 — OLM won't silently auto-upgrade past it;
+the initial install plan is approved automatically). N-2 is computed live from
+the package's channel entries (e.g. cert-manager head `v1.16.5` → pins
+`v1.15.2`; argocd head `v0.18.0` → pins `v0.16.0`). Pass `--version-policy
+latest` to track the channel head instead (no pin, automatic upgrades). This
+applies to the OperatorHub operators (cert-manager, ArgoCD, GitLab); the
+Jenkins/Grafana images and the storage-provisioner manifests are pinned to
+known-good versions in the scripts. OLM does not downgrade in place, so the
+policy takes effect on a *fresh* install of each operator.
+
+Notes & caveats:
+- Each installer is **failure-isolated** — one failing doesn't abort the
+  others — and its URL/credentials are appended to the deploy summary.
+- **GitLab is experimental and heavy** (gitaly, postgres, redis, minio,
+  webservice, sidekiq, its own nginx-ingress). It needs a storageclass, but
+  `platform: none` ships none, so selecting GitLab first installs
+  **local-path-provisioner** (lab-grade, local-dir backed) and marks it the
+  default storageclass. There is no cert-manager on the cluster, so the
+  `GitLab` CR disables it (`certmanager.install: false`). GitLab reconciles
+  asynchronously — watch `oc -n gitlab-system get gitlab,pods`.
+- `--yes` installs only ArgoCD + Jenkins (GitLab is opt-in).
+- ArgoCD and Jenkins (ephemeral) need no persistent storage; only GitLab (and
+  `jenkins-persistent`, not used here) do.
 
 ---
 

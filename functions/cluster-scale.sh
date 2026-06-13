@@ -37,6 +37,9 @@ handle_existing_cluster() {
     create_admin || exit 1
     log "Done: admin user '$ADMIN_CREATED' created"
     exit 0
+  elif [ "$FLAG_DEVOPS" = 1 ]; then
+    install_devops || exit 1
+    exit 0
   elif [ "$ASSUME_YES" = 1 ]; then
     err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale / --monitoring"
   else
@@ -49,9 +52,10 @@ handle_existing_cluster() {
       echo "  2) Monitoring — UNAVAILABLE (needs a node with >12 GB RAM, largest is ${MON_MAX_GB:-0} GB)"
     fi
     echo "  3) Admin — create htpasswd admin user (replaces kubeadmin)"
-    echo "  4) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
-    printf 'Selection [4]: '
-    read -r SCSEL; SCSEL=${SCSEL:-4}
+    echo "  4) DevOps — install ArgoCD / Jenkins / GitLab"
+    echo "  5) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
+    printf 'Selection [5]: '
+    read -r SCSEL; SCSEL=${SCSEL:-5}
     case "$SCSEL" in
       1) DO_SCALE=1 ;;
       2) install_monitoring || exit 1
@@ -59,6 +63,8 @@ handle_existing_cluster() {
          exit 0 ;;
       3) create_admin || exit 1
          log "Done: admin user '$ADMIN_CREATED' created"
+         exit 0 ;;
+      4) install_devops || exit 1
          exit 0 ;;
     esac
   fi
@@ -132,6 +138,17 @@ MDOWNWARN
     fi
   fi
 
+  apply_scale
+  exit 0
+}
+
+# apply_scale — drain/remove nodes if shrinking, run terraform to the target
+# counts, approve CSRs if growing. Reads CUR_MASTERS/CUR_WORKERS (current) and
+# NEW_MASTERS/NEW_WORKERS (target) plus DOMAIN as globals. Used by the
+# interactive scale flow AND by the autoscaler (functions/autoscale.sh), so it
+# must NOT exit — it returns to the caller. Returns 0 if the expected node
+# count became Ready, 1 otherwise.
+apply_scale() {
   export KUBECONFIG=$PWD/ignition/auth/kubeconfig
   TOOLBOX=quay.io/slauger/hcloud-okd4:$OPENSHIFT_RELEASE
 
@@ -214,5 +231,5 @@ MDOWNWARN
     echo "      oc -n openshift-etcd get pods"
   fi
   log "Scale complete: $NEW_MASTERS master(s), $NEW_WORKERS worker(s)"
-  exit 0
+  [ "${READY:-0}" -ge "$EXPECTED" ]
 }

@@ -166,6 +166,7 @@ providers:
 - { name: workloads,     orgId: 1, folder: 'Workloads',     type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/workloads } }
 - { name: network,       orgId: 1, folder: 'Network',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/network } }
 - { name: storage,       orgId: 1, folder: 'Storage',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/storage } }
+- { name: onzack,        orgId: 1, folder: 'ONZACK',        type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/onzack } }
 DBPEOF
     oc -n grafana create configmap grafana-dashboard-provider \
       --from-file=dashboards.yaml="$dstmp" --dry-run=client -o yaml | oc apply -f -
@@ -177,6 +178,23 @@ DBPEOF
     done
     # the pre-category flat configmap is no longer mounted
     oc -n grafana delete configmap grafana-dashboards --ignore-not-found >/dev/null
+  fi
+  # vendored third-party dashboards (ONZACK) live OUTSIDE grafana/dashboards/
+  # because gen-dashboards.py rmtree's that tree on every regenerate. We use
+  # the "without-recording-rules" variants: they run the full queries inline
+  # against thanos-querier (which federates platform + UWM metrics), so they
+  # need no PrometheusRule — see grafana/vendor/onzack/rules/README for why
+  # the recording-rules variant cannot populate on OKD's split stack.
+  if ls grafana/vendor/onzack/*.json >/dev/null 2>&1; then
+    local ozargs=() j
+    for j in grafana/vendor/onzack/*.json; do ozargs+=(--from-file="$j"); done
+    # server-side apply: the two dashboards total ~536 KB, which overflows the
+    # 262144-byte kubectl.kubernetes.io/last-applied-configuration annotation
+    # that client-side `oc apply` writes. Server-side apply stores no such
+    # annotation (the object only needs to stay under the ~1 MB etcd limit).
+    oc -n grafana create configmap grafana-dashboards-onzack \
+      "${ozargs[@]}" --dry-run=client -o yaml \
+      | oc apply --server-side --force-conflicts -f -
   fi
   rm -f "$dstmp"
   oc apply -f - <<GRAFANA
@@ -239,6 +257,8 @@ spec:
           mountPath: /var/lib/grafana/dashboards/network
         - name: db-storage
           mountPath: /var/lib/grafana/dashboards/storage
+        - name: db-onzack
+          mountPath: /var/lib/grafana/dashboards/onzack
       volumes:
       - name: data
         emptyDir: {}
@@ -272,6 +292,10 @@ spec:
       - name: db-storage
         configMap:
           name: grafana-dashboards-storage
+          optional: true
+      - name: db-onzack
+        configMap:
+          name: grafana-dashboards-onzack
           optional: true
 ---
 apiVersion: v1
