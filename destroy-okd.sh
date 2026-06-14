@@ -81,6 +81,40 @@ else
   [ "$CONFIRM" = "yes" ] || { echo "Aborted."; exit 0; }
 fi
 
+# ── cluster-autoscaler nodes (created via the Hetzner API, NOT terraform) ──
+# The upstream cluster-autoscaler provisions servers directly through the
+# Hetzner API, so `terraform destroy` neither knows nor removes them — and
+# while they stay attached to the cluster network/firewall they BLOCK terraform
+# from deleting those. Remove them first, scoped to this cluster: servers
+# carrying the autoscaler's 'hcloud/node-group' label that are attached to the
+# cluster network (falling back to the 'worker-asc-/autoscaled-' name prefix if
+# the network is already gone).
+log "Removing cluster-autoscaler nodes (not managed by terraform)"
+CA_NETID=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
+  "https://api.hetzner.cloud/v1/networks?name=$TF_VAR_dns_domain" 2>/dev/null | jq -r '.networks[0].id // empty' || true)
+ca_node_ids() {
+  curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" "https://api.hetzner.cloud/v1/servers?per_page=100" 2>/dev/null \
+    | jq -r --arg net "${CA_NETID:-}" '
+        .servers[]
+        | select(.labels["hcloud/node-group"] != null)
+        | select( ($net != "" and ([.private_net[].network | tostring] | index($net)))
+                  or ($net == "" and (.name | test("^(worker-asc|autoscaled)-"))) )
+        | "\(.id) \(.name)"' 2>/dev/null || true
+}
+CA_NODES=$(ca_node_ids)
+if [ -n "$CA_NODES" ]; then
+  echo "$CA_NODES" | while read -r id name; do
+    [ -n "$id" ] || continue
+    curl -s -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
+      "https://api.hetzner.cloud/v1/servers/$id" >/dev/null && echo "  deleted autoscaled node ${name:-$id}"
+  done
+  printf '    waiting for them to be removed'
+  for _ in $(seq 1 30); do [ -z "$(ca_node_ids)" ] && break; printf '.'; sleep 2; done
+  echo " done"
+else
+  echo "  none found"
+fi
+
 log "Destroying infrastructure with terraform"
 # chown the workspace back to the host user afterwards (the toolbox runs as
 # root and would otherwise leave terraform state etc. root-owned)
