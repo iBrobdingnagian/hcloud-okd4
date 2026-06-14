@@ -39,7 +39,7 @@ install_cluster_autoscaler() {
   # default the pool to the SAME server type the existing workers run (so
   # autoscaled nodes match the cluster); fall back to cx33 if unknown
   local pooltype=${FLAG_CA_TYPE:-${TF_VAR_server_type_worker:-cx33}} pmin=${FLAG_CA_MIN:-0} pmax=${FLAG_CA_MAX:-3}
-  local pool=autoscaled loc=${TF_VAR_location:-nbg1} net=${DOMAIN} cav=${CA_VERSION:-$CA_VERSION_DEFAULT}
+  local pool=worker-asc loc=${TF_VAR_location:-nbg1} net=${DOMAIN} cav=${CA_VERSION:-$CA_VERSION_DEFAULT}
   case "$pmin$pmax" in *[!0-9]*) err "--ca-min/--ca-max must be numbers"; return 1;; esac
   [ "$pmax" -ge "$pmin" ] || { err "--ca-max ($pmax) must be >= --ca-min ($pmin)"; return 1; }
 
@@ -53,8 +53,51 @@ install_cluster_autoscaler() {
   fw="${DOMAIN}-base"   # the cluster-internal firewall workers carry
   cli=$(oc -n openshift get istag cli:latest -o jsonpath='{.image.dockerImageReference}' 2>/dev/null)
   [ -n "$cli" ] || cli=quay.io/openshift/origin-cli:latest
-  # HCLOUD_CLOUD_INIT must be base64 of the node userdata (the worker ignition)
-  b64init=$(base64 < ignition/worker.ign | tr -d '\n')
+  # HCLOUD_CLOUD_INIT must be base64 of the node userdata (the worker ignition).
+  # The autoscaler feeds ONE shared cloud-init to every pool node and names
+  # servers "<pool>-<randomhex>", so we can't do per-node sequential names like
+  # workerNN. To still get meaningful node names (not Hetzner's rDNS
+  # "static.<ip>…"), we extend worker.ign with a oneshot unit that, before
+  # kubelet, reads the server name from the Hetzner metadata service and sets
+  # the hostname to "<servername>.<domain>" — i.e. the k8s node registers as
+  # "worker-asc-<id>.${DOMAIN}".
+  local hn_script hn_unit
+  hn_script=$(cat <<SH
+#!/bin/bash
+set -e
+name=""
+for i in \$(seq 1 30); do
+  meta=\$(curl -s --max-time 5 http://169.254.169.254/hetzner/v1/metadata || true)
+  name=\$(printf '%s\n' "\$meta" | sed -n 's/^hostname:[[:space:]]*//p' | head -1)
+  [ -n "\$name" ] && break
+  sleep 2
+done
+[ -n "\$name" ] || exit 0
+case "\$name" in *.${DOMAIN}) fqdn="\$name";; *) fqdn="\$name.${DOMAIN}";; esac
+/usr/bin/hostnamectl set-hostname "\$fqdn"
+SH
+)
+  hn_unit=$(cat <<'UNIT'
+[Unit]
+Description=Set hostname from Hetzner Cloud metadata (autoscaled node)
+After=network-online.target
+Wants=network-online.target
+Before=kubelet.service node-valid-hostname.service nodeip-configuration.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/set-hostname-from-metadata.sh
+[Install]
+WantedBy=multi-user.target
+UNIT
+)
+  b64init=$(jq -c \
+    --arg unit "$hn_unit" \
+    --arg src "data:text/plain;charset=utf-8;base64,$(printf '%s' "$hn_script" | base64 | tr -d '\n')" '
+    .systemd.units = ((.systemd.units // []) + [{name:"set-hcloud-hostname.service", enabled:true, contents:$unit}])
+    | .storage.files = ((.storage.files // []) + [{path:"/usr/local/bin/set-hostname-from-metadata.sh", mode:493, overwrite:true, contents:{source:$src}}])
+    ' ignition/worker.ign | base64 | tr -d '\n')
+  [ -n "$b64init" ] || b64init=$(base64 < ignition/worker.ign | tr -d '\n')  # fallback
 
   log "Installing Cluster Autoscaler (Hetzner cloud provider) — EXPERIMENTAL"
   echo "    pool '$pool': type=$pooltype region=$loc min=$pmin max=$pmax"
@@ -255,7 +298,7 @@ CSR
 
   log "Cluster Autoscaler installed"
   cat <<EOF
-    pool 'autoscaled': $pooltype in $loc, scales $pmin..$pmax nodes on Pending-pod pressure.
+    pool '$pool': $pooltype in $loc, scales $pmin..$pmax nodes on Pending-pod pressure.
     It creates Hetzner servers via the API; they boot worker.ign and join (CSRs
     auto-approved). Watch it:
       oc -n $CA_NS logs deploy/cluster-autoscaler -f
@@ -263,8 +306,9 @@ CSR
       oc get nodes -w
     Tune the pool by editing the --nodes flag on deploy/cluster-autoscaler.
     Caveats (platform "none", EXPERIMENTAL): only the '${DOMAIN}-base' firewall is
-    attached (HCLOUD_FIREWALL takes one); autoscaled nodes join with their
-    Hetzner name, not workerNN; terraform does not manage these nodes.
+    attached (HCLOUD_FIREWALL takes one); autoscaled nodes join as
+    worker-asc-<id>.${DOMAIN} (random id, not sequential workerNN — the
+    autoscaler can't do per-node indices); terraform does not manage them.
 EOF
   return 0
 }

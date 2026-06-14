@@ -134,9 +134,18 @@ Notes & caveats (EXPERIMENTAL):
   1.31.0 hardcodes an internal draining pool with the retired `cx11` type, which
   breaks every cycle; 1.30.3 / 1.31.1 / 1.32+ remove it.
 - Only one firewall can be attached via `HCLOUD_FIREWALL` (the `…-base` one);
-  autoscaled nodes join under their Hetzner name (not `workerNN`) and are **not**
-  managed by Terraform. Watch it with
+  autoscaled nodes are **not** managed by Terraform. Watch it with
   `oc -n cluster-autoscaler logs deploy/cluster-autoscaler -f`.
+- **Node naming:** the autoscaler mints servers as `<pool>-<randomhex>` from a
+  single shared cloud-init, so it can't do sequential `workerNN` names (that's
+  the Terraform `--scale` path). The pool is named `worker-asc` and the
+  cloud-init injects a hostname unit that reads the Hetzner metadata server name
+  before kubelet starts, so nodes register as
+  **`worker-asc-<id>.<domain>`** (e.g. `worker-asc-2d77a23c….okd4.myhelpdesk.gr`)
+  instead of Hetzner's default rDNS `static.<ip>…` name.
+- **Prove it:** `./deploy-okd.sh --ca-smoke-test` creates a throwaway Pending
+  workload so a real node is provisioned via the Hetzner API and joins, then
+  deletes it (the node scales back down after the cooldown).
 
 ### Monitoring, alerting & Grafana
 
