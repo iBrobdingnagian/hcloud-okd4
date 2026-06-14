@@ -43,6 +43,9 @@ handle_existing_cluster() {
   elif [ "$FLAG_RESCALE" = 1 ]; then
     run_rescale || exit 1
     exit 0
+  elif [ "$FLAG_CA" = 1 ]; then
+    install_cluster_autoscaler || exit 1
+    exit 0
   elif [ "$ASSUME_YES" = 1 ]; then
     err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale / --rescale / --monitoring"
   else
@@ -57,9 +60,10 @@ handle_existing_cluster() {
     fi
     echo "  4) Admin — create htpasswd admin user (replaces kubeadmin)"
     echo "  5) DevOps — install cert-manager / ArgoCD / Jenkins / GitLab / Harbor / JFrog / AWX"
-    echo "  6) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
-    printf 'Selection [6]: '
-    read -r SCSEL; SCSEL=${SCSEL:-6}
+    echo "  6) Cluster Autoscaler — Hetzner-API node pool (scales on Pending pods)"
+    echo "  7) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
+    printf 'Selection [7]: '
+    read -r SCSEL; SCSEL=${SCSEL:-7}
     case "$SCSEL" in
       1) DO_SCALE=1 ;;
       2) run_rescale || exit 1
@@ -71,6 +75,8 @@ handle_existing_cluster() {
          log "Done: admin user '$ADMIN_CREATED' created"
          exit 0 ;;
       5) install_devops || exit 1
+         exit 0 ;;
+      6) install_cluster_autoscaler || exit 1
          exit 0 ;;
     esac
   fi

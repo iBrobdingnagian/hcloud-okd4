@@ -102,6 +102,42 @@ Each action goes through the same Terraform + drain + CSR path as a manual
 ./deploy-okd.sh --autoscale --autoscale-min 1 --autoscale-max 4 --autoscale-interval 30
 ```
 
+#### Resident Cluster Autoscaler — Hetzner cloud provider (`--cluster-autoscaler`)
+
+If you want a **resident, in-cluster** autoscaler (not a foreground loop), deploy
+the upstream **Kubernetes Cluster Autoscaler with the native Hetzner cloud
+provider**, which calls the Hetzner API directly to create/delete servers in a
+node pool. (OpenShift's `MachineAutoscaler` still can't be used here — it needs
+MachineSets, which `platform: none` doesn't have — but the *upstream*
+cluster-autoscaler has a `hetzner` provider that bypasses the Machine API.)
+
+```bash
+./deploy-okd.sh --cluster-autoscaler --ca-type cx43 --ca-min 0 --ca-max 3
+```
+
+What it installs (namespace `cluster-autoscaler`):
+- the `cluster-autoscaler --cloud-provider=hetzner` Deployment, with a node pool
+  `--nodes=<min>:<max>:<type>:<region>:autoscaled`. New servers boot
+  **`ignition/worker.ign`** (base64'd into `HCLOUD_CLOUD_INIT`), the cluster's
+  **FCOS snapshot** (`HCLOUD_IMAGE`), the **network** (`HCLOUD_NETWORK`), the
+  `…-base` **firewall** and the project **SSH key**;
+- a small **CSR auto-approver** Deployment — required because `platform: none`
+  won't auto-approve CSRs for nodes with no backing Machine, so unattended
+  nodes would otherwise never reach `Ready`.
+
+Notes & caveats (EXPERIMENTAL):
+- `--ca-type` defaults to the **current worker type** (`TF_VAR_server_type_worker`)
+  so autoscaled nodes match the cluster; `--ca-min`/`--ca-max` default `0`/`3`.
+- All cluster-scoped objects are prefixed `hcloud-` to avoid colliding with
+  OpenShift's CVO-managed `cluster-autoscaler` ClusterRole/Binding.
+- The image is pinned to **v1.30.3**: the Hetzner provider in 1.29.x / 1.30.0 /
+  1.31.0 hardcodes an internal draining pool with the retired `cx11` type, which
+  breaks every cycle; 1.30.3 / 1.31.1 / 1.32+ remove it.
+- Only one firewall can be attached via `HCLOUD_FIREWALL` (the `…-base` one);
+  autoscaled nodes join under their Hetzner name (not `workerNN`) and are **not**
+  managed by Terraform. Watch it with
+  `oc -n cluster-autoscaler logs deploy/cluster-autoscaler -f`.
+
 ### Monitoring, alerting & Grafana
 
 `deploy-okd.sh` can configure the OKD monitoring stack beyond its defaults:

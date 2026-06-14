@@ -70,6 +70,14 @@ Usage: ./deploy-okd.sh [options]
                     when load fits on fewer workers. Workers only.
                     NOTE: native MachineSets/MachineAutoscaler can't run on
                     Hetzner (platform "none"); this drives the --scale path.
+  --cluster-autoscaler  deploy the upstream Kubernetes Cluster Autoscaler with
+                    the native Hetzner cloud provider (resident in-cluster pod +
+                    a CSR auto-approver). Scales a node pool via the Hetzner API
+                    on Pending-pod pressure. EXPERIMENTAL on platform "none".
+  --ca-type T       autoscaled pool server type (default: the current worker
+                    type, TF_VAR_server_type_worker)
+  --ca-min N        pool minimum nodes (default 0)
+  --ca-max N        pool maximum nodes (default 3)
   --autoscale-min N   floor for worker count (default: current)
   --autoscale-max N   ceiling for worker count (default: current + 2)
   --autoscale-interval S  poll interval in seconds (default 60, min 15)
@@ -86,6 +94,7 @@ FLAG_MONITORING=0 ALERT_WEBHOOK="" FLAG_ADMIN=0
 FLAG_AUTOSCALE=0 FLAG_AUTOSCALE_MIN="" FLAG_AUTOSCALE_MAX="" FLAG_AUTOSCALE_INTERVAL=""
 FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
 FLAG_RESCALE=0 FLAG_RESCALE_ROLE="" FLAG_RESCALE_TYPE=""
+FLAG_CA=0 FLAG_CA_TYPE="" FLAG_CA_MIN="" FLAG_CA_MAX=""
 VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -114,6 +123,10 @@ while [ $# -gt 0 ]; do
     --rescale)            FLAG_RESCALE=1; shift ;;
     --rescale-role)       FLAG_RESCALE_ROLE=${2:?--rescale-role needs master|worker|all}; FLAG_RESCALE=1; shift 2 ;;
     --rescale-type)       FLAG_RESCALE_TYPE=${2:?--rescale-type needs a server type}; FLAG_RESCALE=1; shift 2 ;;
+    --cluster-autoscaler) FLAG_CA=1; shift ;;
+    --ca-type)            FLAG_CA_TYPE=${2:?--ca-type needs a server type}; FLAG_CA=1; shift 2 ;;
+    --ca-min)             FLAG_CA_MIN=${2:?--ca-min needs a value}; FLAG_CA=1; shift 2 ;;
+    --ca-max)             FLAG_CA_MAX=${2:?--ca-max needs a value}; FLAG_CA=1; shift 2 ;;
     --autoscale)          FLAG_AUTOSCALE=1; shift ;;
     --autoscale-min)      FLAG_AUTOSCALE_MIN=${2:?--autoscale-min needs a value}; shift 2 ;;
     --autoscale-max)      FLAG_AUTOSCALE_MAX=${2:?--autoscale-max needs a value}; shift 2 ;;
