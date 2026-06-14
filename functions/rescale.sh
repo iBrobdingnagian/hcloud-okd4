@@ -105,11 +105,33 @@ run_rescale() {
     if [ "$ASSUME_YES" = 1 ]; then
       err "--rescale needs --rescale-type <server-type> in non-interactive mode"; return 1
     fi
+    local loc=${TF_VAR_location:-} cand names n nm c m d pr prtxt sel
     echo
-    echo "Available x86 types (name: vCPU / RAM / disk):"
-    echo "$types_json" | jq -r '.server_types[] | select(.architecture=="x86" and .deprecated==false)
-      | "    \(.name): \(.cores) vCPU / \(.memory)GB / \(.disk)GB"' | sort -t/ -k2 -n
-    printf 'New server type: '; read -r newtype
+    echo "Available x86 server types${loc:+ — monthly price for $loc} (vCPU / RAM / disk):"
+    # x86, non-deprecated, sorted by monthly price; price is for the cluster's
+    # location (0 => not offered there, shown as n/a). TAB-separated rows.
+    cand=$(echo "$types_json" | jq -r --arg loc "$loc" '
+      .server_types[] | select(.architecture=="x86" and .deprecated==false) | . as $t
+      | ( [ $t.prices[] | select($loc=="" or .location==$loc) | .price_monthly.gross | tonumber ] | (.[0] // 0) ) as $p
+      | [$t.name, ($t.cores|tostring), ($t.memory|tostring), ($t.disk|tostring), (($p*100|round)/100|tostring)]
+      | @tsv' | sort -t"$(printf '\t')" -k5 -n)
+    n=0; names=""
+    while IFS=$'\t' read -r nm c m d pr; do
+      [ -n "$nm" ] || continue
+      n=$((n+1)); names="$names$nm
+"
+      if [ "$pr" = "0" ]; then prtxt="    n/a"; else prtxt=$(printf '€%s/mo' "$pr"); fi
+      printf '  %2d) %-7s %2s vCPU / %3sGB RAM / %4sGB disk — %s\n' "$n" "$nm" "$c" "$m" "$d" "$prtxt"
+    done <<EOF
+$cand
+EOF
+    printf 'New server type (number or name): '; read -r sel
+    if printf '%s' "$sel" | grep -qE '^[0-9]+$'; then
+      newtype=$(printf '%s' "$names" | sed -n "${sel}p")
+    else
+      newtype=$sel
+    fi
+    [ -n "$newtype" ] || { err "no server type selected"; return 1; }
   fi
   local tcores tmem tdisk
   tcores=$(echo "$types_json" | jq -r --arg t "$newtype" '.server_types[]|select(.name==$t)|.cores' | head -1)
