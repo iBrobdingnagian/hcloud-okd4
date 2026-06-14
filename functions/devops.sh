@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# functions/devops.sh — optional DevOps stack (ArgoCD, Jenkins, GitLab)
+# functions/devops.sh — optional DevOps stack
+#   operators (OLM): cert-manager, ArgoCD, GitLab
+#   Helm:            Harbor (+ Dex OIDC bridge), JFrog Artifactory OSS, AWX
+#   image/Deployment: Jenkins (OpenShift Jenkins image, OAuth login)
 # Sourced by deploy-okd.sh; not meant to be executed directly.
 #
-# Installs CI/CD & GitOps tooling on a running cluster. Where an OperatorHub
-# operator exists in the cluster's catalog it is used (ArgoCD, GitLab);
-# Jenkins has no operator in the community catalog here, so the bundled
-# `jenkins-ephemeral` template is used (its image speaks OpenShift OAuth, so
-# login uses the cluster identity out of the box).
+# Installs CI/CD, GitOps, registry & cert tooling on a running cluster. Where an
+# OperatorHub operator exists in the cluster's catalog it is used (cert-manager,
+# ArgoCD, GitLab). Harbor and JFrog have no usable operator in the community
+# catalog, so they are installed with Helm. Jenkins runs the OpenShift Jenkins
+# image directly (its openshift-login plugin speaks OpenShift OAuth, so login
+# uses the cluster identity out of the box).
 #
 # Each installer is failure-isolated (one failing does not abort the others)
 # and appends to DEVOPS_NOTE for the final summary.
@@ -115,6 +119,49 @@ OG
   fi
   _subscribe "$ns" "$pkg" "$pkg" "$chan"
   _wait_csv "$ns"
+}
+
+# ── cluster facts & Helm helpers (Harbor / JFrog) ─────────────────────────
+# name of the default storageclass (set up by ensure_storage_backend)
+_default_sc() {
+  oc get storageclass -o json 2>/dev/null | jq -r '.items[]
+    | select(.metadata.annotations["storageclass.kubernetes.io/is-default-class"]=="true")
+    | .metadata.name' | head -1
+}
+# the cluster's ingress wildcard domain, e.g. apps.okd4.example.com
+_ingress_domain() { oc get ingresses.config/cluster -o jsonpath='{.spec.domain}' 2>/dev/null; }
+# the kube/OAuth API URL, e.g. https://api.okd4.example.com:6443
+_api_url() { oc whoami --show-server 2>/dev/null; }
+
+# echo the N-2 chart version for a helm repo/chart per VERSION_POLICY (empty =>
+# use the chart head). Extends the operator N-2 policy to Helm-installed apps.
+_helm_n2_version() {  # _helm_n2_version <repo/chart>
+  [ "$VERSION_POLICY" = "n-2" ] || return 0
+  helm search repo "$1" --versions -o json 2>/dev/null \
+    | jq -r 'if (type=="array" and length>0) then (.[2].version // .[-1].version) else empty end'
+}
+
+# create/replace an edge-terminated Route to a Service in a namespace
+_make_route() {  # _make_route <ns> <name> <service> <targetPort> <host>
+  oc apply -f - >/dev/null <<RT
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: $2
+  namespace: $1
+spec:
+  host: $5
+  to: { kind: Service, name: $3 }
+  port: { targetPort: $4 }
+  tls: { termination: edge, insecureEdgeTerminationPolicy: Redirect }
+RT
+}
+
+# guard: Harbor & JFrog are Helm-installed (no usable operator in the catalog)
+_need_helm() {
+  command -v helm >/dev/null 2>&1 && return 0
+  echo "    helm is not installed on this host — Harbor/JFrog need it. Install helm and re-run."
+  return 1
 }
 
 # ── cert-manager (operator) ───────────────────────────────────────────────
@@ -363,6 +410,309 @@ GCR
   return 0
 }
 
+# ── Dex OIDC bridge (so apps get real OIDC against OpenShift OAuth) ────────
+# OpenShift's built-in OAuth server is OAuth2, NOT a compliant OIDC provider
+# (no /.well-known/openid-configuration), so apps that want *native* OIDC SSO
+# (Harbor's web UI + `docker login`) can't point straight at it. Dex bridges
+# the gap: its `openshift` connector delegates to the cluster OAuth server while
+# Dex itself exposes a proper OIDC discovery endpoint that Harbor consumes.
+# Uses in-memory storage (lab-grade: refresh tokens are lost if Dex restarts).
+# Idempotent. Exports DEX_ISSUER and DEX_HARBOR_SECRET for the caller.
+DEX_ISSUER="" DEX_HARBOR_SECRET=""
+install_dex_oidc() {
+  local ingd apiurl
+  ingd=$(_ingress_domain); apiurl=$(_api_url)
+  [ -n "$ingd" ] && [ -n "$apiurl" ] || { echo "    cannot resolve ingress domain / API url — skipping Dex"; return 1; }
+  local dex_host="dex-oidc.$ingd" harbor_host="harbor.$ingd"
+  DEX_ISSUER="https://$dex_host"
+  _devops_ns dex
+  # reuse existing client secrets across re-runs so Harbor's stored config stays valid
+  local oc_secret hb_secret
+  oc_secret=$(oc -n dex get secret dex-secrets -o jsonpath='{.data.openshift-client-secret}' 2>/dev/null | base64 -d 2>/dev/null)
+  hb_secret=$(oc -n dex get secret dex-secrets -o jsonpath='{.data.harbor-client-secret}'    2>/dev/null | base64 -d 2>/dev/null)
+  [ -n "$oc_secret" ] || oc_secret=$(openssl rand -hex 24)
+  [ -n "$hb_secret" ] || hb_secret=$(openssl rand -hex 24)
+  DEX_HARBOR_SECRET="$hb_secret"
+
+  # an OpenShift OAuthClient that Dex authenticates as (cluster-scoped)
+  oc apply -f - >/dev/null <<OAC
+apiVersion: oauth.openshift.io/v1
+kind: OAuthClient
+metadata:
+  name: dex-sso
+secret: $oc_secret
+redirectURIs:
+- https://$dex_host/callback
+grantMethod: prompt
+OAC
+
+  # stash the client secrets (so re-runs are stable) + Dex config
+  oc -n dex create secret generic dex-secrets \
+    --from-literal=openshift-client-secret="$oc_secret" \
+    --from-literal=harbor-client-secret="$hb_secret" \
+    --dry-run=client -o yaml | oc apply -f - >/dev/null
+
+  oc -n dex create configmap dex-config --dry-run=client -o yaml --from-literal=config.yaml="$(cat <<CFG
+issuer: https://$dex_host
+storage:
+  type: memory
+web:
+  http: 0.0.0.0:5556
+oauth2:
+  skipApprovalScreen: true
+connectors:
+- type: openshift
+  id: openshift
+  name: OpenShift
+  config:
+    issuer: $apiurl
+    clientID: dex-sso
+    clientSecret: $oc_secret
+    redirectURI: https://$dex_host/callback
+    insecureCA: true
+staticClients:
+- id: harbor
+  name: Harbor
+  secret: $hb_secret
+  redirectURIs:
+  - https://$harbor_host/c/oidc/callback
+CFG
+)" | oc apply -f - >/dev/null
+
+  oc apply -f - >/dev/null <<DEX
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: dex, namespace: dex }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: dex } }
+  template:
+    metadata: { labels: { app: dex }, annotations: { checksum/config: "$(echo "$oc_secret$hb_secret$dex_host" | md5sum | cut -c1-12)" } }
+    spec:
+      containers:
+      - name: dex
+        image: ghcr.io/dexidp/dex:v2.41.1
+        command: ["/usr/local/bin/dex", "serve", "/etc/dex/cfg/config.yaml"]
+        ports: [{ containerPort: 5556, name: http }]
+        volumeMounts: [{ name: config, mountPath: /etc/dex/cfg }]
+        resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
+      volumes:
+      - name: config
+        configMap: { name: dex-config }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: dex, namespace: dex }
+spec:
+  selector: { app: dex }
+  ports: [{ name: http, port: 5556, targetPort: 5556 }]
+DEX
+  _make_route dex dex dex 5556 "$dex_host"
+  oc -n dex rollout restart deploy/dex >/dev/null 2>&1 || true
+  oc -n dex rollout status deploy/dex --timeout=180s 2>/dev/null \
+    || echo "    Dex still starting — check: oc -n dex get pods"
+  echo "    Dex OIDC issuer: $DEX_ISSUER"
+  return 0
+}
+
+# ── Harbor (Helm) — container registry, OpenShift OIDC SSO via Dex ────────
+install_harbor() {
+  log "Installing Harbor (Helm goharbor/harbor) + Dex OIDC SSO — EXPERIMENTAL"
+  _need_helm || { DEVOPS_NOTE="$DEVOPS_NOTE
+  harbor      : FAILED — helm not installed"; return 1; }
+  ensure_storage_backend || { DEVOPS_NOTE="$DEVOPS_NOTE
+  harbor      : FAILED — no usable storageclass"; return 1; }
+  local sc ingd host pass ver
+  sc=$(_default_sc); ingd=$(_ingress_domain); host="harbor.$ingd"
+  [ -n "$ingd" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  harbor      : FAILED — cannot resolve ingress domain"; return 1; }
+  _devops_ns harbor
+  # Harbor pins fixed uids/fsGroups (10000, 999 for pg/redis) — anyuid allows
+  # those (RunAsAny). anyuid has NO seccompProfiles though, so we also strip the
+  # chart's seccompProfile below (keeping the rest of its hardening) instead of
+  # falling back to the much broader 'privileged' SCC.
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:harbor >/dev/null 2>&1 || true
+
+  # stand up the OIDC bridge first (best-effort; Harbor still works w/ local admin)
+  install_dex_oidc || echo "    Dex bridge unavailable — Harbor will install with a local admin only"
+
+  helm repo add harbor https://helm.goharbor.io >/dev/null 2>&1 || true
+  helm repo update harbor >/dev/null 2>&1 || true
+  ver=$(_helm_n2_version harbor/harbor)
+  [ -n "$ver" ] && echo "    pinning chart harbor/harbor to $ver [policy $VERSION_POLICY]"
+
+  # reuse an existing admin password across re-runs
+  pass=$(oc -n harbor get secret harbor-core -o jsonpath='{.data.HARBOR_ADMIN_PASSWORD}' 2>/dev/null | base64 -d 2>/dev/null)
+  [ -n "$pass" ] || pass=$(openssl rand -hex 12)
+
+  # expose.type=clusterIP: Harbor makes a ClusterIP svc "harbor:80"; TLS is
+  # terminated at the OpenShift edge route, so disable Harbor-side TLS.
+  helm upgrade --install harbor harbor/harbor -n harbor ${ver:+--version "$ver"} \
+    --set expose.type=clusterIP \
+    --set expose.tls.enabled=false \
+    --set externalURL="https://$host" \
+    --set harborAdminPassword="$pass" \
+    --set-json 'containerSecurityContext={"privileged":false,"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":null}' \
+    --set persistence.persistentVolumeClaim.registry.storageClass="$sc" \
+    --set persistence.persistentVolumeClaim.registry.size=20Gi \
+    --set persistence.persistentVolumeClaim.jobservice.jobLog.storageClass="$sc" \
+    --set persistence.persistentVolumeClaim.database.storageClass="$sc" \
+    --set persistence.persistentVolumeClaim.redis.storageClass="$sc" \
+    --set persistence.persistentVolumeClaim.trivy.storageClass="$sc" \
+    --wait --timeout 8m >/dev/null 2>&1 \
+    || echo "    helm reported a timeout/error — Harbor may still be settling; check: oc -n harbor get pods"
+
+  # route by the service's *named* port ('http'): the OpenShift router resolves
+  # a numeric targetPort against the pod port (8080), not the service port (80),
+  # so the name is the unambiguous choice (numeric 80 yields a router 503).
+  _make_route harbor harbor harbor http "$host"
+
+  # configure native OIDC against Dex (best-effort; needs Harbor core ready)
+  if [ -n "$DEX_ISSUER" ]; then
+    echo "    configuring Harbor auth_mode=oidc against $DEX_ISSUER"
+    local t=0 code
+    while [ "$t" -lt 36 ]; do   # ~3 min for core to answer
+      code=$(curl -sk -o /dev/null -w '%{http_code}' -u "admin:$pass" \
+        "https://$host/api/v2.0/systeminfo" 2>/dev/null)
+      [ "$code" = 200 ] && break
+      sleep 5; t=$((t+1))
+    done
+    if [ "$code" = 200 ]; then
+      curl -sk -u "admin:$pass" -X PUT "https://$host/api/v2.0/configurations" \
+        -H 'Content-Type: application/json' -d "$(cat <<JSON
+{"auth_mode":"oidc_auth","oidc_name":"openshift","oidc_endpoint":"$DEX_ISSUER",
+ "oidc_client_id":"harbor","oidc_client_secret":"$DEX_HARBOR_SECRET",
+ "oidc_scope":"openid,profile,email,offline_access","oidc_verify_cert":false,
+ "oidc_auto_onboard":true,"oidc_user_claim":"email"}
+JSON
+)" >/dev/null 2>&1 && echo "    Harbor OIDC SSO enabled (login via 'LOGIN VIA OIDC PROVIDER')" \
+        || echo "    OIDC config call failed — set it later in Harbor > Configuration > Authentication"
+    else
+      echo "    Harbor core not reachable yet — enable OIDC later in the UI (endpoint $DEX_ISSUER)"
+    fi
+  fi
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  harbor      : https://$host  (admin / $pass; OIDC SSO via OpenShift if Dex came up)"
+  return 0
+}
+
+# ── JFrog Artifactory OSS (Helm) ──────────────────────────────────────────
+# NOTE: OSS edition has NO Docker/OCI registry and NO SSO (both are Pro
+# features) — it serves Maven/npm/PyPI/etc. with a local admin only.
+install_artifactory() {
+  log "Installing JFrog Artifactory OSS (Helm jfrog/artifactory-oss) — EXPERIMENTAL"
+  echo "    note: OSS = no Docker registry, no SSO (local admin only; those are Pro features)"
+  _need_helm || { DEVOPS_NOTE="$DEVOPS_NOTE
+  artifactory : FAILED — helm not installed"; return 1; }
+  ensure_storage_backend || { DEVOPS_NOTE="$DEVOPS_NOTE
+  artifactory : FAILED — no usable storageclass"; return 1; }
+  local sc ingd host ver svc
+  sc=$(_default_sc); ingd=$(_ingress_domain); host="artifactory.$ingd"
+  [ -n "$ingd" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  artifactory : FAILED — cannot resolve ingress domain"; return 1; }
+  _devops_ns artifactory
+  # the artifactory-oss chart pins uid/fsGroup 1030 AND sets seccompProfile on
+  # all 9 containers, with no values toggle to disable either — so anyuid (no
+  # seccomp) can't admit it. Grant the broader 'privileged' SCC to the ns SAs.
+  oc adm policy add-scc-to-group privileged system:serviceaccounts:artifactory >/dev/null 2>&1 || true
+
+  helm repo add jfrog https://charts.jfrog.io >/dev/null 2>&1 || true
+  helm repo update jfrog >/dev/null 2>&1 || true
+  ver=$(_helm_n2_version jfrog/artifactory-oss)
+  [ -n "$ver" ] && echo "    pinning chart jfrog/artifactory-oss to $ver [policy $VERSION_POLICY]"
+
+  # bundled nginx disabled — we expose the JFrog router (8082) via an edge route
+  helm upgrade --install artifactory jfrog/artifactory-oss -n artifactory ${ver:+--version "$ver"} \
+    --set artifactory.persistence.storageClassName="$sc" \
+    --set artifactory.persistence.size=20Gi \
+    --set postgresql.persistence.storageClassName="$sc" \
+    --set nginx.enabled=false \
+    --set artifactory.service.type=ClusterIP \
+    --wait --timeout 8m >/dev/null 2>&1 \
+    || echo "    helm reported a timeout/error — Artifactory may still be settling; check: oc -n artifactory get pods"
+
+  # the JFrog router service exposes 8082 (UI/API); find it whatever its name is,
+  # and route by the port's NAME (router resolves numeric targetPort against the
+  # pod port, which may differ from 8082 — see the Harbor note above)
+  local svcjson pname
+  svcjson=$(oc -n artifactory get svc -o json 2>/dev/null)
+  svc=$(echo "$svcjson" | jq -r '.items[] | select([.spec.ports[]?.port]|index(8082)) | .metadata.name' | head -1)
+  pname=$(echo "$svcjson" | jq -r --arg s "$svc" '.items[] | select(.metadata.name==$s) | .spec.ports[] | select(.port==8082) | (.name // "8082")' | head -1)
+  [ -n "$pname" ] || pname=8082
+  if [ -n "$svc" ]; then
+    _make_route artifactory artifactory "$svc" "$pname" "$host"
+    DEVOPS_NOTE="$DEVOPS_NOTE
+  artifactory : https://$host  (default login admin/password; change it on first use)"
+  else
+    DEVOPS_NOTE="$DEVOPS_NOTE
+  artifactory : installed but the 8082 service wasn't found — oc -n artifactory get svc"
+  fi
+  return 0
+}
+
+# ── AWX / Ansible Automation Platform (Helm: awx-operator) ────────────────
+# The community AWX Operator ships an official Helm chart that can also create
+# the AWX instance itself (AWX.enabled=true). On OpenShift we set
+# ingress_type=route so the operator publishes an edge Route automatically.
+install_awx() {
+  log "Installing AWX / Ansible Automation Platform (Helm awx-operator) — EXPERIMENTAL"
+  echo "    deploys the AWX operator + an AWX instance (web, task, ee, redis, managed postgres)"
+  _need_helm || { DEVOPS_NOTE="$DEVOPS_NOTE
+  awx         : FAILED — helm not installed"; return 1; }
+  ensure_storage_backend || { DEVOPS_NOTE="$DEVOPS_NOTE
+  awx         : FAILED — no usable storageclass"; return 1; }
+  local sc ver host="" pass=""
+  sc=$(_default_sc)
+  _devops_ns awx
+  # managed postgres / awx pods — allow their uids
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:awx >/dev/null 2>&1 || true
+
+  helm repo add awx-operator https://ansible-community.github.io/awx-operator-helm/ >/dev/null 2>&1 || true
+  helm repo update awx-operator >/dev/null 2>&1 || true
+  ver=$(_helm_n2_version awx-operator/awx-operator)
+  [ -n "$ver" ] && echo "    pinning chart awx-operator/awx-operator to $ver [policy $VERSION_POLICY]"
+
+  # operator + AWX CR in one release; ingress_type=route -> OpenShift edge route.
+  # postgres PVC lands on the default storageclass. No --wait: the operator
+  # reconciles AWX asynchronously, and its kube-rbac-proxy sidecar would keep
+  # the pod un-Ready (see the image fix below) and stall a --wait pointlessly.
+  helm upgrade --install awx-operator awx-operator/awx-operator -n awx ${ver:+--version "$ver"} \
+    --set AWX.enabled=true \
+    --set AWX.name=awx \
+    --set AWX.spec.ingress_type=route \
+    --set AWX.spec.postgres_storage_class="$sc" >/dev/null 2>&1 \
+    || echo "    helm reported an error — check: oc -n awx get awx,pods"
+
+  # the chart's metrics sidecar pulls gcr.io/kubebuilder/kube-rbac-proxy, which
+  # is frequently unpullable; repoint it at the maintained quay.io/brancz mirror
+  # so the operator pod goes Ready (the awx-manager container, and thus AWX
+  # reconciliation, work regardless — this just unblocks readiness/metrics).
+  local t=0
+  until oc -n awx get deploy awx-operator-controller-manager >/dev/null 2>&1; do
+    t=$((t+1)); [ $t -le 24 ] || break; sleep 5
+  done
+  oc -n awx set image deploy/awx-operator-controller-manager \
+    kube-rbac-proxy=quay.io/brancz/kube-rbac-proxy:v0.15.0 >/dev/null 2>&1 || true
+
+  echo "    AWX reconciles asynchronously (operator builds web/task/postgres). Watching for the route…"
+  local t=0
+  until [ -n "$host" ]; do
+    host=$(oc -n awx get route awx -o jsonpath='{.spec.host}' 2>/dev/null)
+    t=$((t+1)); [ $t -le 48 ] || break; sleep 5   # ~4 min for the route
+  done
+  pass=$(oc -n awx get secret awx-admin-password -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null)
+  if [ -n "$host" ]; then
+    DEVOPS_NOTE="$DEVOPS_NOTE
+  awx         : https://$host  (admin / ${pass:-oc -n awx get secret awx-admin-password -o jsonpath='{.data.password}' | base64 -d})"
+  else
+    DEVOPS_NOTE="$DEVOPS_NOTE
+  awx         : installing (async) — watch: oc -n awx get awx,pods,route. Admin pw in
+                secret awx-admin-password once the instance is up."
+  fi
+  return 0
+}
+
 # ── menu / dispatcher ─────────────────────────────────────────────────────
 install_devops() {
   export KUBECONFIG=$PWD/ignition/auth/kubeconfig
@@ -379,9 +729,12 @@ install_devops() {
     echo "DevOps tooling to install (space-separated numbers, e.g. '1 2 3'):"
     echo "  1) cert-manager — certificate automation (operator)"
     echo "  2) ArgoCD       — GitOps (argocd-operator)"
-    echo "  3) Jenkins      — CI (bundled template, OpenShift OAuth login)"
+    echo "  3) Jenkins      — CI (bundled image, OpenShift OAuth login)"
     echo "  4) GitLab       — SCM/CI (gitlab-operator; heavy, needs a storageclass)"
-    echo "  5) All"
+    echo "  5) Harbor       — container registry (Helm; OpenShift OIDC SSO via Dex)"
+    echo "  6) JFrog        — Artifactory OSS (Helm; local admin, no registry/SSO)"
+    echo "  7) AWX          — Ansible Automation Platform (Helm awx-operator)"
+    echo "  8) All"
     printf 'Selection [1 2 3]: '
     read -r DSEL; DSEL=${DSEL:-1 2 3}
     for n in $DSEL; do
@@ -390,7 +743,10 @@ install_devops() {
         2) selected="$selected argocd" ;;
         3) selected="$selected jenkins" ;;
         4) selected="$selected gitlab" ;;
-        5) selected="cert-manager argocd jenkins gitlab" ;;
+        5) selected="$selected harbor" ;;
+        6) selected="$selected artifactory" ;;
+        7) selected="$selected awx" ;;
+        8) selected="cert-manager argocd jenkins gitlab harbor artifactory awx" ;;
       esac
     done
   fi
@@ -407,7 +763,10 @@ install_devops() {
       argocd)  install_argocd  || true ;;
       jenkins) install_jenkins || true ;;
       gitlab)  install_gitlab  || true ;;
-      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab)" ;;
+      harbor)  install_harbor  || true ;;
+      artifactory|jfrog) install_artifactory || true ;;
+      awx)     install_awx     || true ;;
+      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx)" ;;
     esac
   done
   [ -n "$DEVOPS_NOTE" ] && log "DevOps tooling:$DEVOPS_NOTE"

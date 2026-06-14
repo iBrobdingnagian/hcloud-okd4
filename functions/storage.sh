@@ -52,6 +52,42 @@ _storage_local() {
   # helper pods use hostPath -> permissive SCC on OpenShift
   oc adm policy add-scc-to-user privileged \
     -z local-path-provisioner-service-account -n local-path-storage >/dev/null 2>&1 || true
+  # Two OpenShift gotchas with the upstream provisioner, both fixed by patching
+  # the helper-pod template + setup script:
+  #  1. the default helper pod doesn't REQUEST root, so OpenShift gives it a
+  #     random uid and its `mkdir` in the root-owned hostPath fails
+  #     ("Permission denied" -> PVCs stuck Pending). Run it root/privileged
+  #     under the (already privileged) provisioner SA.
+  #  2. SELinux is Enforcing: the new dir lands as type `var_t`, which a
+  #     confined container (container_t) cannot write — workloads then crash
+  #     with "permission denied" the moment they touch the volume. The setup
+  #     script relabels it to `container_file_t`. busybox has no `chcon`, so the
+  #     helper image is ubi-minimal (public, ships chcon).
+  local helper='apiVersion: v1
+kind: Pod
+metadata:
+  name: helper-pod
+spec:
+  priorityClassName: system-node-critical
+  serviceAccountName: local-path-provisioner-service-account
+  tolerations:
+    - key: node.kubernetes.io/disk-pressure
+      operator: Exists
+      effect: NoSchedule
+  containers:
+  - name: helper-pod
+    image: registry.access.redhat.com/ubi9/ubi-minimal
+    imagePullPolicy: IfNotPresent
+    securityContext:
+      runAsUser: 0
+      privileged: true'
+  local setup='#!/bin/sh
+set -eu
+mkdir -m 0777 -p "$VOL_DIR"
+chcon -R -t container_file_t "$VOL_DIR" 2>/dev/null || true'
+  oc -n local-path-storage patch cm local-path-config --type merge \
+    -p "$(jq -n --arg h "$helper" --arg s "$setup" '{data:{"helperPod.yaml":$h,"setup":$s}}')" >/dev/null 2>&1 || true
+  oc -n local-path-storage rollout restart deploy/local-path-provisioner >/dev/null 2>&1 || true
   oc -n local-path-storage rollout status deploy/local-path-provisioner --timeout=180s \
     || echo "    WARNING: local-path-provisioner did not become ready"
   oc patch storageclass local-path \

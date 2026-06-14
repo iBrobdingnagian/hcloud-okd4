@@ -189,8 +189,9 @@ Notes:
 `deploy-okd.sh` can install CI/CD & GitOps tooling on the running cluster —
 interactively (a prompt after the cluster is up, or the "DevOps" entry in the
 existing-cluster menu) or non-interactively with `--devops` /
-`--devops-components argocd,jenkins,gitlab`. Where an OperatorHub operator
-exists in the cluster's catalog it is used; otherwise a bundled template.
+`--devops-components argocd,jenkins,gitlab,harbor,artifactory,awx`. Where an
+OperatorHub operator exists in the cluster's catalog it is used; otherwise the
+component is installed with Helm or run as a plain Deployment.
 
 | Component | How it's installed | Login |
 |-----------|--------------------|-------|
@@ -198,6 +199,9 @@ exists in the cluster's catalog it is used; otherwise a bundled template.
 | **ArgoCD** | `argocd-operator` Subscription (channel `alpha`, into `openshift-operators` — it only supports AllNamespaces) + an `ArgoCD` CR that enables a reencrypt Route | `admin` / secret `argocd-cluster` (printed in the summary) |
 | **Jenkins** | the OpenShift Jenkins image run as a plain Deployment (no Jenkins operator in the catalog; the bundled DeploymentConfig template is deprecated/unreliable on 4.16) | **your OpenShift account** — the image's OAuth login plugin (`OPENSHIFT_ENABLE_OAUTH`) + the SA's `oauth-redirectreference` |
 | **GitLab** | `gitlab-operator-kubernetes` Subscription (channel `stable`, own-namespace — it only supports OwnNamespace) + a `GitLab` CR | `root` / secret `gitlab-gitlab-initial-root-password` |
+| **Harbor** | Helm chart `goharbor/harbor` (no usable operator in the catalog), `expose.type=clusterIP` behind an OpenShift edge Route, PVCs on the default storageclass | **your OpenShift account** via a bundled **Dex** OIDC bridge (`auth_mode=oidc_auth`), *and* a local `admin` (random password, in the summary) |
+| **JFrog Artifactory OSS** | Helm chart `jfrog/artifactory-oss` (no operator), bundled nginx disabled in favour of an OpenShift edge Route, PVCs on the default storageclass | local `admin` only — **OSS has no SSO and no Docker/OCI registry** (both are Pro features) |
+| **AWX** (Ansible Automation Platform) | Helm chart `awx-operator/awx-operator` with `AWX.enabled=true` (deploys the operator *and* an AWX instance); `ingress_type=route` so the operator publishes an edge Route; managed postgres PVC on the default storageclass | `admin` / secret `awx-admin-password` (printed in the summary) |
 
 **Version policy (`--version-policy`, default `n-2`):** operators are pinned
 **two releases behind the channel head** for stability, not the bleeding edge.
@@ -207,10 +211,11 @@ the initial install plan is approved automatically). N-2 is computed live from
 the package's channel entries (e.g. cert-manager head `v1.16.5` → pins
 `v1.15.2`; argocd head `v0.18.0` → pins `v0.16.0`). Pass `--version-policy
 latest` to track the channel head instead (no pin, automatic upgrades). This
-applies to the OperatorHub operators (cert-manager, ArgoCD, GitLab); the
-Jenkins/Grafana images and the storage-provisioner manifests are pinned to
-known-good versions in the scripts. OLM does not downgrade in place, so the
-policy takes effect on a *fresh* install of each operator.
+applies to the OperatorHub operators (cert-manager, ArgoCD, GitLab) **and the
+Helm charts** (Harbor, Artifactory — the 3rd-newest chart version is picked);
+the Jenkins/Grafana/Dex images and the storage-provisioner manifests are pinned
+to known-good versions in the scripts. OLM does not downgrade in place, so for
+operators the policy takes effect on a *fresh* install.
 
 Notes & caveats:
 - Each installer is **failure-isolated** — one failing doesn't abort the
@@ -222,9 +227,27 @@ Notes & caveats:
   default storageclass. There is no cert-manager on the cluster, so the
   `GitLab` CR disables it (`certmanager.install: false`). GitLab reconciles
   asynchronously — watch `oc -n gitlab-system get gitlab,pods`.
-- `--yes` installs only ArgoCD + Jenkins (GitLab is opt-in).
-- ArgoCD and Jenkins (ephemeral) need no persistent storage; only GitLab (and
-  `jenkins-persistent`, not used here) do.
+- **Harbor, JFrog & AWX are Helm-installed and experimental**, and need `helm`
+  on the host plus a default storageclass (auto-provisioned like GitLab).
+  Harbor's random-UID problem is handled by granting `anyuid` to the namespace's
+  service accounts and stripping the chart's `seccompProfile` (which `anyuid`
+  doesn't permit) while keeping the rest of its container hardening.
+- **AWX** installs the community `awx-operator` Helm chart with
+  `AWX.enabled=true`, so it deploys both the operator and an AWX instance; it
+  reconciles asynchronously — watch `oc -n awx get awx,pods,route`. Login is
+  `admin` / secret `awx-admin-password`. It is **not** the Red Hat Ansible
+  Automation Platform product (that needs a subscription); this is upstream AWX.
+- **Harbor SSO uses a Dex bridge.** OpenShift's built-in OAuth server is OAuth2,
+  *not* a compliant OIDC provider (no `/.well-known/openid-configuration`), so a
+  tiny **Dex** instance (in the `dex` namespace, `openshift` connector → cluster
+  OAuth) is deployed to expose real OIDC discovery, and Harbor's
+  `auth_mode=oidc_auth` is pointed at it. If Dex doesn't come up, Harbor still
+  works with its local `admin`.
+- **JFrog OSS** is registry-less and SSO-less by design (those are Pro
+  features); pick it only for Maven/npm/PyPI-style repositories with a local
+  admin. For an SSO-capable OCI registry, **Harbor** is the better fit here.
+- `--yes` installs only cert-manager + ArgoCD + Jenkins (GitLab, Harbor, JFrog
+  and AWX are opt-in — they're heavier and want persistent storage).
 
 ---
 
