@@ -78,6 +78,9 @@ Usage: ./deploy-okd.sh [options]
                     type, TF_VAR_server_type_worker)
   --ca-min N        pool minimum nodes (default 0)
   --ca-max N        pool maximum nodes (default 3)
+  --ca-smoke-test   prove the autoscaler end-to-end: create a throwaway Pending
+                    workload so a real Hetzner node is provisioned and joins,
+                    then delete it (the node scales down after the cooldown)
   --autoscale-min N   floor for worker count (default: current)
   --autoscale-max N   ceiling for worker count (default: current + 2)
   --autoscale-interval S  poll interval in seconds (default 60, min 15)
@@ -94,7 +97,7 @@ FLAG_MONITORING=0 ALERT_WEBHOOK="" FLAG_ADMIN=0
 FLAG_AUTOSCALE=0 FLAG_AUTOSCALE_MIN="" FLAG_AUTOSCALE_MAX="" FLAG_AUTOSCALE_INTERVAL=""
 FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
 FLAG_RESCALE=0 FLAG_RESCALE_ROLE="" FLAG_RESCALE_TYPE=""
-FLAG_CA=0 FLAG_CA_TYPE="" FLAG_CA_MIN="" FLAG_CA_MAX=""
+FLAG_CA=0 FLAG_CA_TYPE="" FLAG_CA_MIN="" FLAG_CA_MAX="" FLAG_CA_SMOKE=0
 VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -127,6 +130,7 @@ while [ $# -gt 0 ]; do
     --ca-type)            FLAG_CA_TYPE=${2:?--ca-type needs a server type}; FLAG_CA=1; shift 2 ;;
     --ca-min)             FLAG_CA_MIN=${2:?--ca-min needs a value}; FLAG_CA=1; shift 2 ;;
     --ca-max)             FLAG_CA_MAX=${2:?--ca-max needs a value}; FLAG_CA=1; shift 2 ;;
+    --ca-smoke-test)      FLAG_CA_SMOKE=1; shift ;;
     --autoscale)          FLAG_AUTOSCALE=1; shift ;;
     --autoscale-min)      FLAG_AUTOSCALE_MIN=${2:?--autoscale-min needs a value}; shift 2 ;;
     --autoscale-max)      FLAG_AUTOSCALE_MAX=${2:?--autoscale-max needs a value}; shift 2 ;;

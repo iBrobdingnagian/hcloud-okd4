@@ -43,6 +43,9 @@ handle_existing_cluster() {
   elif [ "$FLAG_RESCALE" = 1 ]; then
     run_rescale || exit 1
     exit 0
+  elif [ "$FLAG_CA_SMOKE" = 1 ]; then
+    ca_smoke_test || exit 1
+    exit 0
   elif [ "$FLAG_CA" = 1 ]; then
     install_cluster_autoscaler || exit 1
     exit 0

@@ -268,3 +268,90 @@ CSR
 EOF
   return 0
 }
+
+# ── smoke test ────────────────────────────────────────────────────────────
+# Prove the Hetzner-API scale-up end to end: create a throwaway workload whose
+# pods can't fit on the current (loaded) nodes but DO fit on a fresh pool node,
+# so the cluster-autoscaler provisions one via the Hetzner API; watch it join
+# (Compute -> Nodes), then delete the workload so it scales back down.
+ca_smoke_test() {
+  export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+  oc whoami >/dev/null 2>&1 || { echo "    cannot reach the cluster — is it running?"; return 1; }
+  oc -n "$CA_NS" get deploy cluster-autoscaler >/dev/null 2>&1 \
+    || { err "cluster-autoscaler is not installed — run --cluster-autoscaler first"; return 1; }
+
+  local ns=ca-smoke-test pooltype camax alloc req nodes baseline replicas
+  pooltype=$(oc -n "$CA_NS" get deploy cluster-autoscaler -o jsonpath='{.spec.template.spec.containers[0].command}' 2>/dev/null \
+    | grep -oE '\-\-nodes=[0-9]+:[0-9]+:[^:"]+' | head -1 | cut -d: -f3)
+  camax=$(oc -n "$CA_NS" get deploy cluster-autoscaler -o jsonpath='{.spec.template.spec.containers[0].command}' 2>/dev/null \
+    | grep -oE '\-\-nodes=[0-9]+:[0-9]+' | head -1 | cut -d: -f2)
+  # CPU request per pod ~60% of a node so the scheduler fits ~one per node;
+  # with replicas = (schedulable nodes)+2, two pods stay Pending -> scale up.
+  alloc=$(oc get nodes -l '!node-role.kubernetes.io/master' -o jsonpath='{.items[0].status.allocatable.cpu}' 2>/dev/null)
+  case "$alloc" in *m) alloc=${alloc%m};; "") alloc=8000;; *) alloc=$((alloc*1000));; esac
+  req=$(( alloc * 60 / 100 )); [ "$req" -lt 500 ] && req=500
+  baseline=$(oc get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  local baseline_ready; baseline_ready=$(oc get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l | tr -d ' ')
+  replicas=$(( baseline + 2 ))
+
+  log "Cluster Autoscaler smoke test (pool type ${pooltype:-?}, max ${camax:-?})"
+  echo "    baseline nodes: $baseline"
+  echo "    creating Deployment ca-smoke: $replicas x pod requesting ${req}m CPU"
+  echo "    (fills current nodes; the surplus stays Pending and fits a fresh"
+  echo "     ${pooltype:-pool} node, so the autoscaler calls the Hetzner API)"
+
+  oc create ns "$ns" >/dev/null 2>&1 || true
+  oc apply -f - >/dev/null <<SMOKE
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ca-smoke, namespace: ${ns} }
+spec:
+  replicas: ${replicas}
+  selector: { matchLabels: { app: ca-smoke } }
+  template:
+    metadata: { labels: { app: ca-smoke } }
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+      - name: hog
+        image: registry.k8s.io/pause:3.9
+        resources:
+          requests: { cpu: "${req}m", memory: "64Mi" }
+SMOKE
+
+  echo "    pending pods now:"
+  oc -n "$ns" get pods --no-headers 2>/dev/null | awk '$3!="Running"' | head
+  echo "    waiting for the autoscaler to provision a node AND for it to reach"
+  echo "    Ready (Hetzner create + FCOS boot + join + CSR approval, ~3-6 min)…"
+  # approve CSRs in-loop too (the csr-approver also does this) and wait until a
+  # NEW node is Ready (autoscaled nodes join under their Hetzner rDNS hostname,
+  # not 'autoscaled-*', so we compare the Ready COUNT, not names)
+  local t=0 ready
+  while [ "$t" -lt 90 ]; do       # up to ~15 min
+    oc get csr -o go-template='{{range .items}}{{if not .status.conditions}}{{.metadata.name}} {{end}}{{end}}' 2>/dev/null \
+      | xargs -r oc adm certificate approve >/dev/null 2>&1 || true
+    ready=$(oc get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l | tr -d ' ')
+    if [ "${ready:-0}" -gt "$baseline_ready" ]; then echo "    >> Ready nodes: $baseline_ready -> $ready (new node joined)"; break; fi
+    sleep 10; t=$((t+1))
+  done
+
+  echo; echo "=== nodes (new ones are 'static.*' rDNS names) ==="; oc get nodes 2>/dev/null
+  echo "=== autoscaled Hetzner servers ==="
+  curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" "https://api.hetzner.cloud/v1/servers?per_page=100" \
+    | jq -r '.servers[]|select(.name|startswith("autoscaled"))|"\(.name): \(.server_type.name) \(.status)"' 2>/dev/null
+  echo "=== a smoke pod now scheduled on a new node? ==="
+  oc -n "$ns" get pods -o wide --no-headers 2>/dev/null | awk '$3=="Running"{print $1, $7}' | grep -vE 'master0|worker0' | head
+  echo "=== autoscaler scale-up log ==="
+  oc -n "$CA_NS" logs deploy/cluster-autoscaler --tail=300 2>/dev/null \
+    | grep -iE 'scale.?up|increasing size|setting.*size|final scale-up' | tail -6
+
+  echo
+  echo "    cleaning up the test workload"
+  oc delete ns "$ns" --wait=false >/dev/null 2>&1 || true
+  cat <<EON
+    The added node is now idle and will be removed automatically by the
+    autoscaler after its cooldown (--scale-down-delay-after-add 10m, then
+    --scale-down-unneeded-time 10m). Watch:  oc get nodes -w
+EON
+  return 0
+}
