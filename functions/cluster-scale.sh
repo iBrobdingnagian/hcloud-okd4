@@ -40,31 +40,37 @@ handle_existing_cluster() {
   elif [ "$FLAG_DEVOPS" = 1 ]; then
     install_devops || exit 1
     exit 0
+  elif [ "$FLAG_RESCALE" = 1 ]; then
+    run_rescale || exit 1
+    exit 0
   elif [ "$ASSUME_YES" = 1 ]; then
-    err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale / --monitoring"
+    err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale / --rescale / --monitoring"
   else
     echo
     echo "  1) Scale — add or remove masters/workers on this cluster"
+    echo "  2) Rescale — change CPU/RAM of existing nodes in place (e.g. cx33->cx43)"
     MON_MAX_GB=$(KUBECONFIG=$PWD/ignition/auth/kubeconfig max_node_ram_gb 2>/dev/null || echo 0)
     if awk -v g="${MON_MAX_GB:-0}" 'BEGIN{exit !(g+0>12)}'; then
-      echo "  2) Monitoring — configure monitoring, alerting & Grafana (largest node: ${MON_MAX_GB} GB RAM)"
+      echo "  3) Monitoring — configure monitoring, alerting & Grafana (largest node: ${MON_MAX_GB} GB RAM)"
     else
-      echo "  2) Monitoring — UNAVAILABLE (needs a node with >12 GB RAM, largest is ${MON_MAX_GB:-0} GB)"
+      echo "  3) Monitoring — UNAVAILABLE (needs a node with >12 GB RAM, largest is ${MON_MAX_GB:-0} GB)"
     fi
-    echo "  3) Admin — create htpasswd admin user (replaces kubeadmin)"
-    echo "  4) DevOps — install ArgoCD / Jenkins / GitLab"
-    echo "  5) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
-    printf 'Selection [5]: '
-    read -r SCSEL; SCSEL=${SCSEL:-5}
+    echo "  4) Admin — create htpasswd admin user (replaces kubeadmin)"
+    echo "  5) DevOps — install cert-manager / ArgoCD / Jenkins / GitLab / Harbor / JFrog / AWX"
+    echo "  6) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
+    printf 'Selection [6]: '
+    read -r SCSEL; SCSEL=${SCSEL:-6}
     case "$SCSEL" in
       1) DO_SCALE=1 ;;
-      2) install_monitoring || exit 1
+      2) run_rescale || exit 1
+         exit 0 ;;
+      3) install_monitoring || exit 1
          log "Done: $MONITORING_NOTE"
          exit 0 ;;
-      3) create_admin || exit 1
+      4) create_admin || exit 1
          log "Done: admin user '$ADMIN_CREATED' created"
          exit 0 ;;
-      4) install_devops || exit 1
+      5) install_devops || exit 1
          exit 0 ;;
     esac
   fi

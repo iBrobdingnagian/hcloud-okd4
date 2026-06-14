@@ -58,6 +58,12 @@ Usage: ./deploy-okd.sh [options]
                     same syntax as --duration); defaults to --duration
   --scale           if an existing cluster is found, offer to add masters/
                     workers to it instead of refusing to proceed
+  --rescale         change CPU/RAM of existing nodes in place WITHOUT destroying
+                    the cluster (Hetzner change-type, disk kept). Rolling, one
+                    node at a time (drain -> power off -> change type -> power on
+                    -> uncordon); masters singly so etcd keeps quorum.
+  --rescale-role R  which nodes: master | worker | all
+  --rescale-type T  target Hetzner server type (e.g. cx43)
   --autoscale       run a load-driven worker autoscaler against the running
                     cluster (foreground watch loop; Ctrl-C to stop). Adds a
                     worker when pods are Pending for cpu/memory, removes one
@@ -79,6 +85,7 @@ FLAG_PROFILE="" FLAG_LAB_TOPOLOGY="" FLAG_LAB_TIER="" FLAG_AUTODESTROY_AT="" FLA
 FLAG_MONITORING=0 ALERT_WEBHOOK="" FLAG_ADMIN=0
 FLAG_AUTOSCALE=0 FLAG_AUTOSCALE_MIN="" FLAG_AUTOSCALE_MAX="" FLAG_AUTOSCALE_INTERVAL=""
 FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
+FLAG_RESCALE=0 FLAG_RESCALE_ROLE="" FLAG_RESCALE_TYPE=""
 VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -104,6 +111,9 @@ while [ $# -gt 0 ]; do
     --version-policy)     VERSION_POLICY=${2:?--version-policy needs a value}; shift 2 ;;
     --no-autodestroy) NO_AUTODESTROY=1; shift ;;
     --scale)          FLAG_SCALE=1; shift ;;
+    --rescale)            FLAG_RESCALE=1; shift ;;
+    --rescale-role)       FLAG_RESCALE_ROLE=${2:?--rescale-role needs master|worker|all}; FLAG_RESCALE=1; shift 2 ;;
+    --rescale-type)       FLAG_RESCALE_TYPE=${2:?--rescale-type needs a server type}; FLAG_RESCALE=1; shift 2 ;;
     --autoscale)          FLAG_AUTOSCALE=1; shift ;;
     --autoscale-min)      FLAG_AUTOSCALE_MIN=${2:?--autoscale-min needs a value}; shift 2 ;;
     --autoscale-max)      FLAG_AUTOSCALE_MAX=${2:?--autoscale-max needs a value}; shift 2 ;;
