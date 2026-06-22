@@ -47,7 +47,9 @@ Usage: ./deploy-okd.sh [options]
   --devops          install DevOps tooling on the running cluster (interactive
                     menu, or use --devops-components). Works on a fresh deploy
                     and on an already-running cluster.
-  --devops-components LIST  comma list of: cert-manager,argocd,jenkins,gitlab
+  --devops-components LIST  comma list of: cert-manager,argocd,jenkins,gitlab,
+                    harbor,artifactory,awx,kafka,kafka-kraft,strimzi-kafka,
+                    appsim
   --storage-backend B  storageclass backend for components needing PVCs:
                       local (node volumes, default) or smb (Hetzner Storage Box)
   --version-policy P  operator version policy: n-2 (default; install two

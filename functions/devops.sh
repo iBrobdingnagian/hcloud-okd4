@@ -713,6 +713,586 @@ install_awx() {
   return 0
 }
 
+# ── Kafka + ZooKeeper (plain manifests) ───────────────────────────────────
+# No usable Kafka operator ships in the community catalog here, so we run a
+# self-contained, ZooKeeper-backed single-broker cluster as two StatefulSets
+# (the canonical Confluent cp-zookeeper + cp-kafka pair, free Community
+# license). Kafka speaks its own TCP protocol — an HTTP/TLS edge Route can't
+# carry it — so it is ClusterIP-only; clients inside the cluster use the
+# bootstrap address kafka.kafka.svc.cluster.local:9092. anyuid lets the images
+# run as their own uid (they write to /var/lib/{zookeeper,kafka}).
+ZOOKEEPER_IMAGE=${ZOOKEEPER_IMAGE:-confluentinc/cp-zookeeper:7.7.1}
+KAFKA_IMAGE=${KAFKA_IMAGE:-confluentinc/cp-kafka:7.7.1}
+install_kafka() {
+  log "Installing Kafka + ZooKeeper (Confluent cp images, single broker, ZooKeeper-backed)"
+  ensure_storage_backend || { DEVOPS_NOTE="$DEVOPS_NOTE
+  kafka       : FAILED — no usable storageclass"; return 1; }
+  local sc
+  sc=$(_default_sc)
+  _devops_ns kafka
+  # cp images run as a fixed (non-root) uid and write to /var/lib — anyuid
+  # (RunAsAny) admits them; restricted-v2's random uid can't write those dirs.
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:kafka >/dev/null 2>&1 || true
+
+  echo "    image (zookeeper): $ZOOKEEPER_IMAGE"
+  echo "    image (kafka)    : $KAFKA_IMAGE"
+
+  # ── ZooKeeper ────────────────────────────────────────────────────────────
+  oc apply -f - >/dev/null <<ZK
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper
+  namespace: kafka
+spec:
+  clusterIP: None
+  selector: { app: zookeeper }
+  ports:
+  - { name: client, port: 2181, targetPort: 2181 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+  namespace: kafka
+spec:
+  serviceName: zookeeper
+  replicas: 1
+  selector:
+    matchLabels: { app: zookeeper }
+  template:
+    metadata:
+      labels: { app: zookeeper }
+    spec:
+      securityContext: { fsGroup: 1000 }
+      containers:
+      - name: zookeeper
+        image: $ZOOKEEPER_IMAGE
+        env:
+        - { name: ZOOKEEPER_CLIENT_PORT, value: "2181" }
+        - { name: ZOOKEEPER_TICK_TIME,   value: "2000" }
+        ports:
+        - { containerPort: 2181, name: client }
+        readinessProbe:
+          tcpSocket: { port: 2181 }
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 30
+        resources:
+          requests: { cpu: 100m, memory: 256Mi }
+          limits:   { memory: 1Gi }
+        volumeMounts:
+        - { name: data, mountPath: /var/lib/zookeeper/data }
+        - { name: log,  mountPath: /var/lib/zookeeper/log }
+  volumeClaimTemplates:
+  - metadata: { name: data }
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: $sc
+      resources: { requests: { storage: 5Gi } }
+  - metadata: { name: log }
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: $sc
+      resources: { requests: { storage: 5Gi } }
+ZK
+  oc -n kafka rollout status statefulset/zookeeper --timeout=300s 2>/dev/null \
+    || echo "    ZooKeeper still starting — check: oc -n kafka get pods"
+
+  # ── Kafka (single broker; replication factors pinned to 1) ────────────────
+  oc apply -f - >/dev/null <<KAFKA
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: kafka
+spec:
+  clusterIP: None
+  selector: { app: kafka }
+  ports:
+  - { name: broker, port: 9092, targetPort: 9092 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: kafka
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels: { app: kafka }
+  template:
+    metadata:
+      labels: { app: kafka }
+    spec:
+      securityContext: { fsGroup: 1000 }
+      containers:
+      - name: kafka
+        image: $KAFKA_IMAGE
+        env:
+        - { name: KAFKA_BROKER_ID,                          value: "1" }
+        - { name: KAFKA_ZOOKEEPER_CONNECT,                  value: "zookeeper:2181" }
+        - { name: KAFKA_LISTENERS,                          value: "PLAINTEXT://0.0.0.0:9092" }
+        - { name: KAFKA_ADVERTISED_LISTENERS,               value: "PLAINTEXT://kafka.kafka.svc.cluster.local:9092" }
+        - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP,     value: "PLAINTEXT:PLAINTEXT" }
+        - { name: KAFKA_INTER_BROKER_LISTENER_NAME,         value: "PLAINTEXT" }
+        - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR,   value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR,      value: "1" }
+        - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS,   value: "0" }
+        - { name: KAFKA_LOG_DIRS,                           value: "/var/lib/kafka/data" }
+        ports:
+        - { containerPort: 9092, name: broker }
+        readinessProbe:
+          tcpSocket: { port: 9092 }
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 40
+        resources:
+          requests: { cpu: 250m, memory: 512Mi }
+          limits:   { memory: 2Gi }
+        volumeMounts:
+        - { name: data, mountPath: /var/lib/kafka/data }
+  volumeClaimTemplates:
+  - metadata: { name: data }
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: $sc
+      resources: { requests: { storage: 10Gi } }
+KAFKA
+  oc -n kafka rollout status statefulset/kafka --timeout=300s 2>/dev/null \
+    || echo "    Kafka still starting — check: oc -n kafka get pods"
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  kafka       : in-cluster only (no HTTP route — native Kafka protocol).
+                bootstrap server: kafka.kafka.svc.cluster.local:9092
+                zookeeper:        zookeeper.kafka.svc.cluster.local:2181"
+  return 0
+}
+
+# ── Kafka (KRaft — modern, ZooKeeper-less) ────────────────────────────────
+# The current Kafka architecture (KIP-500): metadata lives in an internal Raft
+# quorum, so ZooKeeper is gone. This runs a single combined node (broker +
+# controller roles) from the official Apache image in its own 'kafka-kraft'
+# namespace, so it can coexist with the classic ZooKeeper-backed install above.
+# Like that one it is ClusterIP-only (native protocol, no HTTP route).
+KAFKA_KRAFT_IMAGE=${KAFKA_KRAFT_IMAGE:-apache/kafka:3.9.0}
+# a fixed, valid (base64-UUID) cluster id keeps first-format deterministic and
+# re-runs idempotent (the image only formats an unformatted log dir).
+KAFKA_CLUSTER_ID=${KAFKA_CLUSTER_ID:-MkU3OEVCNTcwNTJENDM2Qk}
+install_kafka_kraft() {
+  log "Installing Kafka (KRaft mode — ZooKeeper-less, single combined node)"
+  ensure_storage_backend || { DEVOPS_NOTE="$DEVOPS_NOTE
+  kafka-kraft : FAILED — no usable storageclass"; return 1; }
+  local sc
+  sc=$(_default_sc)
+  _devops_ns kafka-kraft
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:kafka-kraft >/dev/null 2>&1 || true
+
+  echo "    image: $KAFKA_KRAFT_IMAGE"
+  oc apply -f - >/dev/null <<KRAFT
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: kafka-kraft
+spec:
+  clusterIP: None
+  selector: { app: kafka-kraft }
+  ports:
+  - { name: broker, port: 9092, targetPort: 9092 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: kafka-kraft
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels: { app: kafka-kraft }
+  template:
+    metadata:
+      labels: { app: kafka-kraft }
+    spec:
+      securityContext: { fsGroup: 1000 }
+      containers:
+      - name: kafka
+        image: $KAFKA_KRAFT_IMAGE
+        env:
+        - { name: CLUSTER_ID,                               value: "$KAFKA_CLUSTER_ID" }
+        - { name: KAFKA_NODE_ID,                            value: "1" }
+        - { name: KAFKA_PROCESS_ROLES,                      value: "broker,controller" }
+        - { name: KAFKA_CONTROLLER_QUORUM_VOTERS,           value: "1@localhost:9093" }
+        # CONTROLLER binds to localhost (matching the single-node quorum voter):
+        # in KRaft a combined node derives the controller's advertised address
+        # from this listener's host, and Kafka rejects a 0.0.0.0 advertised host.
+        - { name: KAFKA_LISTENERS,                          value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://localhost:9093" }
+        - { name: KAFKA_ADVERTISED_LISTENERS,               value: "PLAINTEXT://kafka.kafka-kraft.svc.cluster.local:9092" }
+        - { name: KAFKA_CONTROLLER_LISTENER_NAMES,          value: "CONTROLLER" }
+        - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP,     value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+        - { name: KAFKA_INTER_BROKER_LISTENER_NAME,         value: "PLAINTEXT" }
+        - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR,   value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+        - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR,      value: "1" }
+        - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS,   value: "0" }
+        - { name: KAFKA_LOG_DIRS,                           value: "/var/lib/kafka/data" }
+        ports:
+        - { containerPort: 9092, name: broker }
+        - { containerPort: 9093, name: controller }
+        readinessProbe:
+          tcpSocket: { port: 9092 }
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 40
+        resources:
+          requests: { cpu: 250m, memory: 512Mi }
+          limits:   { memory: 2Gi }
+        volumeMounts:
+        - { name: data, mountPath: /var/lib/kafka/data }
+  volumeClaimTemplates:
+  - metadata: { name: data }
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: $sc
+      resources: { requests: { storage: 10Gi } }
+KRAFT
+  oc -n kafka-kraft rollout status statefulset/kafka --timeout=300s 2>/dev/null \
+    || echo "    Kafka (KRaft) still starting — check: oc -n kafka-kraft get pods"
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  kafka-kraft : KRaft mode, no ZooKeeper. in-cluster only (native protocol).
+                bootstrap server: kafka.kafka-kraft.svc.cluster.local:9092"
+  return 0
+}
+
+# a KafkaUser authenticated by mutual TLS (the User Operator mints a client
+# certificate into secret 'app-user') and authorized (simple ACLs) to use the
+# appsim topic + consumer group. Idempotent — applied by install_strimzi and
+# re-applied by install_appsim so the user/cert exist even on a pre-built cluster.
+_strimzi_app_user() {
+  oc apply -f - >/dev/null <<USER
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: app-user
+  namespace: strimzi
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  authentication:
+    type: tls
+  authorization:
+    type: simple
+    acls:
+      - resource: { type: topic, name: appsim-demo, patternType: literal }
+        operations: [Create, Describe, Read, Write]
+      - resource: { type: group, name: appsim, patternType: literal }
+        operations: [Read, Describe]
+USER
+}
+
+# ── Strimzi Kafka (operator) ──────────────────────────────────────────────
+# The production-grade way to run Kafka on Kubernetes: the Strimzi operator
+# (in the community catalog) reconciles a Kafka custom resource into the full
+# cluster. Modern Strimzi is KRaft-based and uses KafkaNodePools, so we create
+# a single dual-role (broker+controller) pool. The listener is mutual-TLS
+# authenticated with simple authorization, so clients connect as a real Kafka
+# user (app-user) presenting a client certificate the operator issues. Bootstrap
+# service the operator publishes: my-cluster-kafka-bootstrap.strimzi.svc:9093.
+install_strimzi() {
+  log "Installing Strimzi Kafka (strimzi-kafka-operator) + a KRaft Kafka cluster"
+  ensure_storage_backend || { DEVOPS_NOTE="$DEVOPS_NOTE
+  strimzi     : FAILED — no usable storageclass"; return 1; }
+  local sc
+  sc=$(_default_sc)
+  _olm_subscribe strimzi strimzi-kafka-operator stable || { DEVOPS_NOTE="$DEVOPS_NOTE
+  strimzi     : operator install FAILED — check: oc -n strimzi get csv,sub"; return 1; }
+  local t=0
+  until oc get crd kafkas.kafka.strimzi.io >/dev/null 2>&1; do
+    t=$((t+1)); [ $t -le 30 ] || { echo "    Strimzi CRDs never appeared"; return 1; }; sleep 5
+  done
+  # node-pools + KRaft annotations: replicas/storage live in the KafkaNodePool;
+  # all replication factors pinned to 1 for a single-node lab cluster.
+  oc apply -f - >/dev/null <<STRIMZI
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: dual-role
+  namespace: strimzi
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  replicas: 1
+  roles:
+    - controller
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 10Gi
+        deleteClaim: false
+        class: $sc
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: my-cluster
+  namespace: strimzi
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    listeners:
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+        authentication:
+          type: tls
+    authorization:
+      type: simple
+    config:
+      offsets.topic.replication.factor: 1
+      transaction.state.log.replication.factor: 1
+      transaction.state.log.min.isr: 1
+      default.replication.factor: 1
+      min.insync.replicas: 1
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+STRIMZI
+  echo "    waiting for the Strimzi Kafka cluster to become Ready (operator builds it; a few min)"
+  oc -n strimzi wait kafka/my-cluster --for=condition=Ready --timeout=600s 2>/dev/null \
+    || echo "    Kafka not Ready yet — check: oc -n strimzi get kafka,kafkanodepool,pods"
+  echo "    creating Kafka user 'app-user' (mTLS) and waiting for its client certificate"
+  _strimzi_app_user
+  oc -n strimzi wait kafkauser/app-user --for=condition=Ready --timeout=300s 2>/dev/null \
+    || echo "    KafkaUser app-user not Ready yet — check: oc -n strimzi get kafkauser"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  strimzi     : Kafka cluster 'my-cluster' (KRaft, mutual-TLS). in-cluster
+                bootstrap: my-cluster-kafka-bootstrap.strimzi.svc:9093
+                user: app-user (cert in secret app-user; CA in
+                my-cluster-cluster-ca-cert)"
+  return 0
+}
+
+# ── Application Simulation (Kafka traffic generator) ──────────────────────
+# A tiny end-to-end test app: a producer that publishes a timestamped message
+# every second to topic 'appsim-demo', and a consumer that reads the stream and
+# logs it — so you can watch real traffic flow through whichever Kafka backend
+# you picked. Uses the Apache Kafka image's console producer/consumer (the wire
+# protocol is backend-agnostic, so the same client works against the classic
+# ZooKeeper-backed cluster or Strimzi). Choose the backend interactively, or set
+# APPSIM_BACKEND=kafka|strimzi non-interactively; the backend is auto-installed
+# if it isn't present yet.
+APPSIM_IMAGE=${APPSIM_IMAGE:-apache/kafka:3.9.0}
+install_appsim() {
+  log "Installing Application Simulation (Kafka producer/consumer traffic generator)"
+  local backend=${APPSIM_BACKEND:-}
+  if [ -z "$backend" ]; then
+    if [ "$ASSUME_YES" = 1 ] || [ -n "$FLAG_DEVOPS_COMPONENTS" ]; then
+      backend=kafka   # default backend for non-interactive runs
+    else
+      echo "    Which Kafka backend should the simulation use?"
+      echo "      1) Kafka + ZooKeeper (classic)"
+      echo "      2) Strimzi Kafka (operator)"
+      printf '    Backend [1]: '
+      read -r BSEL; BSEL=${BSEL:-1}
+      case "$BSEL" in 2) backend=strimzi ;; *) backend=kafka ;; esac
+    fi
+  fi
+
+  _devops_ns kafka-appsim
+  # the console tools write under /opt/kafka (owned by the image uid) — anyuid
+  # lets them run as that uid instead of restricted-v2's random one.
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:kafka-appsim >/dev/null 2>&1 || true
+
+  local BOOTSTRAP tls=0
+  case "$backend" in
+    strimzi)
+      oc get kafka my-cluster -n strimzi >/dev/null 2>&1 || install_strimzi || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim      : FAILED — Strimzi Kafka backend unavailable"; return 1; }
+      # make sure the mTLS user + its certificate exist (no-op if already there)
+      _strimzi_app_user
+      oc -n strimzi wait kafkauser/app-user --for=condition=Ready --timeout=300s 2>/dev/null \
+        || echo "    KafkaUser app-user not Ready yet — proceeding (producer/consumer will retry)"
+      # the app runs in kafka-appsim; copy the cluster CA + user cert secrets
+      # over (secrets can't be mounted across namespaces)
+      local s
+      for s in my-cluster-cluster-ca-cert app-user; do
+        oc -n strimzi get secret "$s" -o json 2>/dev/null \
+          | jq 'del(.metadata.namespace,.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.ownerReferences,.metadata.managedFields,.status)' \
+          | oc -n kafka-appsim apply -f - >/dev/null 2>&1 \
+          || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim      : FAILED — could not copy Strimzi secret '$s' into kafka-appsim"; return 1; }
+      done
+      BOOTSTRAP="my-cluster-kafka-bootstrap.strimzi.svc:9093"; tls=1
+      ;;
+    *)
+      backend=kafka
+      oc -n kafka get statefulset kafka >/dev/null 2>&1 || install_kafka || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim      : FAILED — Kafka+ZooKeeper backend unavailable"; return 1; }
+      BOOTSTRAP="kafka.kafka.svc.cluster.local:9092"
+      ;;
+  esac
+  echo "    backend: $backend   bootstrap: $BOOTSTRAP$([ "$tls" = 1 ] && echo '   (mutual TLS as user app-user)')"
+
+  # Producer & consumer each wrap their client in a retry loop so they ride out
+  # the broker still coming up (and any restart) instead of crash-looping.
+  # For Strimzi we mount the user cert + cluster CA (PKCS12) and write a
+  # client.properties that selects SSL with mTLS; the classic backend is plain.
+  if [ "$tls" = 1 ]; then
+    oc apply -f - >/dev/null <<APPSIMTLS
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appsim-producer
+  namespace: kafka-appsim
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: appsim-producer }
+  template:
+    metadata:
+      labels: { app: appsim-producer }
+    spec:
+      containers:
+      - name: producer
+        image: $APPSIM_IMAGE
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          printf 'security.protocol=SSL\nssl.truststore.location=/certs/ca/ca.p12\nssl.truststore.password=%s\nssl.truststore.type=PKCS12\nssl.keystore.location=/certs/user/user.p12\nssl.keystore.password=%s\nssl.keystore.type=PKCS12\n' "\$CA_PASS" "\$USER_PASS" > /tmp/client.properties
+          while true; do
+            { n=0; while true; do n=\$((n+1)); echo "appsim msg \$n at \$(date -u +%FT%TZ)"; sleep 1; done; } | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server $BOOTSTRAP --topic appsim-demo --producer.config /tmp/client.properties
+            echo "producer exited; retrying in 5s"; sleep 5
+          done
+        env:
+        - { name: CA_PASS,   valueFrom: { secretKeyRef: { name: my-cluster-cluster-ca-cert, key: ca.password } } }
+        - { name: USER_PASS, valueFrom: { secretKeyRef: { name: app-user, key: user.password } } }
+        volumeMounts:
+        - { name: ca,   mountPath: /certs/ca,   readOnly: true }
+        - { name: user, mountPath: /certs/user, readOnly: true }
+        resources:
+          requests: { cpu: 50m, memory: 256Mi }
+          limits:   { memory: 512Mi }
+      volumes:
+      - name: ca
+        secret: { secretName: my-cluster-cluster-ca-cert, items: [{ key: ca.p12, path: ca.p12 }] }
+      - name: user
+        secret: { secretName: app-user, items: [{ key: user.p12, path: user.p12 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appsim-consumer
+  namespace: kafka-appsim
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: appsim-consumer }
+  template:
+    metadata:
+      labels: { app: appsim-consumer }
+    spec:
+      containers:
+      - name: consumer
+        image: $APPSIM_IMAGE
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          printf 'security.protocol=SSL\nssl.truststore.location=/certs/ca/ca.p12\nssl.truststore.password=%s\nssl.truststore.type=PKCS12\nssl.keystore.location=/certs/user/user.p12\nssl.keystore.password=%s\nssl.keystore.type=PKCS12\n' "\$CA_PASS" "\$USER_PASS" > /tmp/client.properties
+          while true; do
+            /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server $BOOTSTRAP --topic appsim-demo --group appsim --from-beginning --consumer.config /tmp/client.properties
+            echo "consumer exited; retrying in 5s"; sleep 5
+          done
+        env:
+        - { name: CA_PASS,   valueFrom: { secretKeyRef: { name: my-cluster-cluster-ca-cert, key: ca.password } } }
+        - { name: USER_PASS, valueFrom: { secretKeyRef: { name: app-user, key: user.password } } }
+        volumeMounts:
+        - { name: ca,   mountPath: /certs/ca,   readOnly: true }
+        - { name: user, mountPath: /certs/user, readOnly: true }
+        resources:
+          requests: { cpu: 50m, memory: 256Mi }
+          limits:   { memory: 512Mi }
+      volumes:
+      - name: ca
+        secret: { secretName: my-cluster-cluster-ca-cert, items: [{ key: ca.p12, path: ca.p12 }] }
+      - name: user
+        secret: { secretName: app-user, items: [{ key: user.p12, path: user.p12 }] }
+APPSIMTLS
+  else
+    oc apply -f - >/dev/null <<APPSIM
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appsim-producer
+  namespace: kafka-appsim
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: appsim-producer }
+  template:
+    metadata:
+      labels: { app: appsim-producer }
+    spec:
+      containers:
+      - name: producer
+        image: $APPSIM_IMAGE
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          while true; do
+            { n=0; while true; do n=\$((n+1)); echo "appsim msg \$n at \$(date -u +%FT%TZ)"; sleep 1; done; } | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server $BOOTSTRAP --topic appsim-demo
+            echo "producer exited; retrying in 5s"; sleep 5
+          done
+        resources:
+          requests: { cpu: 50m, memory: 256Mi }
+          limits:   { memory: 512Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appsim-consumer
+  namespace: kafka-appsim
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: appsim-consumer }
+  template:
+    metadata:
+      labels: { app: appsim-consumer }
+    spec:
+      containers:
+      - name: consumer
+        image: $APPSIM_IMAGE
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          while true; do
+            /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server $BOOTSTRAP --topic appsim-demo --group appsim --from-beginning
+            echo "consumer exited; retrying in 5s"; sleep 5
+          done
+        resources:
+          requests: { cpu: 50m, memory: 256Mi }
+          limits:   { memory: 512Mi }
+APPSIM
+  fi
+  oc -n kafka-appsim rollout status deploy/appsim-consumer --timeout=180s 2>/dev/null \
+    || echo "    consumer still starting — check: oc -n kafka-appsim get pods"
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim      : simulating traffic on topic 'appsim-demo' via $BOOTSTRAP (backend: $backend$([ "$tls" = 1 ] && echo ', mTLS as app-user')).
+                watch it flow: oc -n kafka-appsim logs deploy/appsim-consumer -f"
+  return 0
+}
+
 # ── menu / dispatcher ─────────────────────────────────────────────────────
 install_devops() {
   export KUBECONFIG=$PWD/ignition/auth/kubeconfig
@@ -734,7 +1314,11 @@ install_devops() {
     echo "  5) Harbor       — container registry (Helm; OpenShift OIDC SSO via Dex)"
     echo "  6) JFrog        — Artifactory OSS (Helm; local admin, no registry/SSO)"
     echo "  7) AWX          — Ansible Automation Platform (Helm awx-operator)"
-    echo "  8) All"
+    echo "  8) Kafka        — Kafka + ZooKeeper (classic, single broker, in-cluster only)"
+    echo "  9) Kafka KRaft  — Kafka KRaft mode (modern, ZooKeeper-less, in-cluster only)"
+    echo " 10) Strimzi      — Strimzi Kafka operator + a KRaft Kafka cluster"
+    echo " 11) App Sim      — Application Simulation: Kafka producer/consumer traffic demo"
+    echo " 12) All"
     printf 'Selection [1 2 3]: '
     read -r DSEL; DSEL=${DSEL:-1 2 3}
     for n in $DSEL; do
@@ -746,7 +1330,11 @@ install_devops() {
         5) selected="$selected harbor" ;;
         6) selected="$selected artifactory" ;;
         7) selected="$selected awx" ;;
-        8) selected="cert-manager argocd jenkins gitlab harbor artifactory awx" ;;
+        8) selected="$selected kafka" ;;
+        9) selected="$selected kafka-kraft" ;;
+        10) selected="$selected strimzi-kafka" ;;
+        11) selected="$selected appsim" ;;
+        12) selected="cert-manager argocd jenkins gitlab harbor artifactory awx kafka kafka-kraft strimzi-kafka" ;;
       esac
     done
   fi
@@ -766,7 +1354,11 @@ install_devops() {
       harbor)  install_harbor  || true ;;
       artifactory|jfrog) install_artifactory || true ;;
       awx)     install_awx     || true ;;
-      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx)" ;;
+      kafka|zookeeper)   install_kafka || true ;;
+      kafka-kraft|kraft) install_kafka_kraft || true ;;
+      strimzi-kafka|strimzi) install_strimzi || true ;;
+      appsim|app-sim|application-simulation) install_appsim || true ;;
+      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, kafka, kafka-kraft, strimzi-kafka, appsim)" ;;
     esac
   done
   [ -n "$DEVOPS_NOTE" ] && log "DevOps tooling:$DEVOPS_NOTE"
