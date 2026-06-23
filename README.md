@@ -16,6 +16,17 @@ This setup is suitable for small test environments only. Not recommended for pro
 
 ---
 
+## Documentation
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — how everything fits together and what every
+  component does (start here for the big picture).
+- [GETTING_STARTED.md](GETTING_STARTED.md) — first run.
+- [APPSIM.md](APPSIM.md) — the real-world application simulations (GitOps, CI/CD, Kafka, AWX).
+- [SCANNING.md](SCANNING.md) — image (Harbor/Trivy) + code (SonarQube) scanning.
+- [AFFINITY.md](AFFINITY.md) — scheduling: affinity/anti-affinity and draining nodes.
+
+---
+
 ## Automated Deploy / Destroy
 
 `deploy-okd.sh` and `destroy-okd.sh` wrap the whole Quick Start procedure below
