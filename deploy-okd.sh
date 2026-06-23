@@ -49,7 +49,10 @@ Usage: ./deploy-okd.sh [options]
                     and on an already-running cluster.
   --devops-components LIST  comma list of: cert-manager,argocd,jenkins,gitlab,
                     harbor,artifactory,awx,kafka,kafka-kraft,strimzi-kafka,
-                    appsim
+                    appsim,loki,loki-operator,tempo,tempo-operator,otel,
+                    otel-operator,observability,observability-operator
+                    (the *-operator variants use OLM + in-cluster MinIO for S3;
+                    the bare names are lightweight Helm single-binary installs)
   --storage-backend B  storageclass backend for components needing PVCs:
                       local (node volumes, default) or smb (Hetzner Storage Box)
   --version-policy P  operator version policy: n-2 (default; install two

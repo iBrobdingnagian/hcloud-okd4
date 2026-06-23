@@ -1318,7 +1318,11 @@ install_devops() {
     echo "  9) Kafka KRaft  — Kafka KRaft mode (modern, ZooKeeper-less, in-cluster only)"
     echo " 10) Strimzi      — Strimzi Kafka operator + a KRaft Kafka cluster"
     echo " 11) App Sim      — Application Simulation: Kafka producer/consumer traffic demo"
-    echo " 12) All"
+    echo " 12) Loki         — logs (Loki + Alloy shipper; Helm single-binary or Operator)"
+    echo " 13) Tempo        — traces (Tempo; Helm single-binary or Operator)"
+    echo " 14) OTel         — OpenTelemetry Collector (traces->Tempo, metrics->UWM)"
+    echo " 15) Observability— Loki + Tempo + OTel together"
+    echo " 16) All"
     printf 'Selection [1 2 3]: '
     read -r DSEL; DSEL=${DSEL:-1 2 3}
     for n in $DSEL; do
@@ -1334,9 +1338,31 @@ install_devops() {
         9) selected="$selected kafka-kraft" ;;
         10) selected="$selected strimzi-kafka" ;;
         11) selected="$selected appsim" ;;
-        12) selected="cert-manager argocd jenkins gitlab harbor artifactory awx kafka kafka-kraft strimzi-kafka" ;;
+        12) selected="$selected loki" ;;
+        13) selected="$selected tempo" ;;
+        14) selected="$selected otel" ;;
+        15) selected="$selected observability" ;;
+        16) selected="cert-manager argocd jenkins gitlab harbor artifactory awx kafka kafka-kraft strimzi-kafka" ;;
       esac
     done
+    # observability components install via Helm (single-binary) or via Operators;
+    # ask once and rewrite the selected obs tokens to their -operator variants.
+    case " $selected " in
+      *" loki "*|*" tempo "*|*" otel "*|*" observability "*)
+        printf 'Observability install method — 1) Helm single-binary  2) Operators [1]: '
+        read -r OMETHOD; OMETHOD=${OMETHOD:-1}
+        if [ "$OMETHOD" = 2 ]; then
+          local rebuilt="" s
+          for s in $selected; do
+            case "$s" in
+              loki|tempo|otel|observability) rebuilt="$rebuilt ${s}-operator" ;;
+              *) rebuilt="$rebuilt $s" ;;
+            esac
+          done
+          selected=$rebuilt
+        fi
+        ;;
+    esac
   fi
   selected=$(echo "$selected" | tr ' ' '\n' | awk 'NF' | sort -u | tr '\n' ' ')
   [ -n "$(echo "$selected" | tr -d ' ')" ] || { echo "    nothing selected"; return 0; }
@@ -1358,9 +1384,22 @@ install_devops() {
       kafka-kraft|kraft) install_kafka_kraft || true ;;
       strimzi-kafka|strimzi) install_strimzi || true ;;
       appsim|app-sim|application-simulation) install_appsim || true ;;
-      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, kafka, kafka-kraft, strimzi-kafka, appsim)" ;;
+      loki)            install_loki  helm     || true ;;
+      loki-operator)   install_loki  operator || true ;;
+      tempo)           install_tempo helm     || true ;;
+      tempo-operator)  install_tempo operator || true ;;
+      otel|otel-operator) ;;  # deferred below so Tempo exists first (OTLP target)
+      observability|obs)      install_loki helm || true; install_tempo helm || true; install_otel helm || true ;;
+      observability-operator) install_loki operator || true; install_tempo operator || true; install_otel operator || true ;;
+      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator])" ;;
     esac
   done
+  # OpenTelemetry last: its OTLP exporter targets Tempo, so Tempo must be up
+  # first when both are selected à-la-carte (sort -u would otherwise run otel first).
+  case " $selected " in
+    *" otel-operator "*) install_otel operator || true ;;
+    *" otel "*)          install_otel helm     || true ;;
+  esac
   [ -n "$DEVOPS_NOTE" ] && log "DevOps tooling:$DEVOPS_NOTE"
   return 0
 }

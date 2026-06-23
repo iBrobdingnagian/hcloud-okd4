@@ -167,11 +167,12 @@ providers:
 - { name: network,       orgId: 1, folder: 'Network',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/network } }
 - { name: storage,       orgId: 1, folder: 'Storage',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/storage } }
 - { name: onzack,        orgId: 1, folder: 'ONZACK',        type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/onzack } }
+- { name: observability, orgId: 1, folder: 'Observability', type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/observability } }
 DBPEOF
     oc -n grafana create configmap grafana-dashboard-provider \
       --from-file=dashboards.yaml="$dstmp" --dry-run=client -o yaml | oc apply -f -
     local cat
-    for cat in cluster control-plane nodes workloads network storage; do
+    for cat in cluster control-plane nodes workloads network storage observability; do
       [ -d "grafana/dashboards/$cat" ] || continue
       oc -n grafana create configmap "grafana-dashboards-$cat" \
         --from-file="grafana/dashboards/$cat/" --dry-run=client -o yaml | oc apply -f -
@@ -259,6 +260,8 @@ spec:
           mountPath: /var/lib/grafana/dashboards/storage
         - name: db-onzack
           mountPath: /var/lib/grafana/dashboards/onzack
+        - name: db-observability
+          mountPath: /var/lib/grafana/dashboards/observability
       volumes:
       - name: data
         emptyDir: {}
@@ -297,6 +300,10 @@ spec:
         configMap:
           name: grafana-dashboards-onzack
           optional: true
+      - name: db-observability
+        configMap:
+          name: grafana-dashboards-observability
+          optional: true
 ---
 apiVersion: v1
 kind: Service
@@ -332,5 +339,13 @@ GRAFANA
     || { echo "    Grafana did not become ready — check: oc -n grafana get pods"; return 1; }
   MONITORING_NOTE="$MONITORING_NOTE
   grafana     : https://grafana.apps.$DOMAIN  (user: admin, password: $pass)"
+  # if the observability stack (Loki/Tempo) is already installed, add its
+  # datasources now — covers the case where Grafana is deployed AFTER it
+  # (functions/observability.sh; no-op if that stack isn't present)
+  if type _obs_grafana_wire >/dev/null 2>&1; then
+    _obs_grafana_wire \
+      && MONITORING_NOTE="$MONITORING_NOTE
+  observability: Loki/Tempo datasources wired into Grafana (Explore -> Loki/Tempo)"
+  fi
   return 0
 }
