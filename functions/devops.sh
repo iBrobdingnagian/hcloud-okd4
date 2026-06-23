@@ -522,6 +522,17 @@ DEX
   return 0
 }
 
+# enable scan-on-push for a Harbor project so every pushed image is automatically
+# scanned by Trivy (report-only — no pull/deploy blocking). Idempotent.
+_harbor_autoscan() {  # _harbor_autoscan <project> [harbor-host] [admin-pass]
+  local proj=$1 host=${2:-} pass=${3:-}
+  [ -n "$host" ] || host="harbor.$(_ingress_domain)"
+  [ -n "$pass" ] || pass=$(oc -n harbor get secret harbor-core -o jsonpath='{.data.HARBOR_ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+  [ -n "$pass" ] || return 1
+  curl -sk -u "admin:$pass" -X PUT "https://$host/api/v2.0/projects/$proj" \
+    -H 'Content-Type: application/json' -d '{"metadata":{"auto_scan":"true"}}' >/dev/null 2>&1
+}
+
 # ── Harbor (Helm) — container registry, OpenShift OIDC SSO via Dex ────────
 install_harbor() {
   log "Installing Harbor (Helm goharbor/harbor) + Dex OIDC SSO — EXPERIMENTAL"
@@ -599,8 +610,13 @@ JSON
     fi
   fi
 
+  # auto-scan every image pushed to the default 'library' project (Trivy, report-only)
+  _harbor_autoscan library "$host" "$pass" \
+    && echo "    scan-on-push (Trivy) enabled for project 'library'"
+
   DEVOPS_NOTE="$DEVOPS_NOTE
-  harbor      : https://$host  (admin / $pass; OIDC SSO via OpenShift if Dex came up)"
+  harbor      : https://$host  (admin / $pass; OIDC SSO via OpenShift if Dex came up)
+                scan-on-push enabled (Trivy auto-scans images; see Projects -> appsim/library -> Scanner)"
   return 0
 }
 
@@ -717,6 +733,56 @@ install_awx() {
   awx         : installing (async) — watch: oc -n awx get awx,pods,route. Admin pw in
                 secret awx-admin-password once the instance is up."
   fi
+  return 0
+}
+
+# ── SonarQube (Helm) — source-code quality / SAST scanning ────────────────
+# NOTE: scans SOURCE CODE (bugs, code smells, security hotspots, coverage) — the
+# COMPLEMENT to Harbor/Trivy, which scans container images. Heavy: bundled
+# PostgreSQL + an Elasticsearch that needs vm.max_map_count=524288 (set by the
+# chart's privileged initSysctl container -> the ns SAs get the 'privileged' SCC).
+install_sonarqube() {
+  log "Installing SonarQube (Helm SonarSource community edition) — EXPERIMENTAL / resource-heavy"
+  _need_helm || { DEVOPS_NOTE="$DEVOPS_NOTE
+  sonarqube   : FAILED — helm not installed"; return 1; }
+  ensure_storage_backend || { DEVOPS_NOTE="$DEVOPS_NOTE
+  sonarqube   : FAILED — no usable storageclass"; return 1; }
+  local sc ingd host ver pass
+  sc=$(_default_sc); ingd=$(_ingress_domain); host="sonarqube.$ingd"
+  [ -n "$ingd" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  sonarqube   : FAILED — cannot resolve ingress domain"; return 1; }
+  _devops_ns sonarqube
+  # initSysctl (vm.max_map_count) runs privileged; ES/sonar pin uids -> need privileged
+  oc adm policy add-scc-to-group privileged system:serviceaccounts:sonarqube >/dev/null 2>&1 || true
+  oc adm policy add-scc-to-group anyuid     system:serviceaccounts:sonarqube >/dev/null 2>&1 || true
+
+  helm repo add sonarqube https://SonarSource.github.io/helm-chart-sonarqube >/dev/null 2>&1 || true
+  helm repo update sonarqube >/dev/null 2>&1 || true
+  ver=$(_helm_n2_version sonarqube/sonarqube)
+  [ -n "$ver" ] && echo "    pinning chart sonarqube/sonarqube to $ver [policy $VERSION_POLICY]"
+
+  # reuse the monitoring passcode across re-runs (the chart requires one)
+  pass=$(oc -n sonarqube get secret sonarqube-sonarqube-monitoring-passcode -o jsonpath='{.data.SONAR_WEB_SYSTEMPASSCODE}' 2>/dev/null | base64 -d 2>/dev/null)
+  [ -n "$pass" ] || pass=$(openssl rand -hex 12)
+
+  helm upgrade --install sonarqube sonarqube/sonarqube -n sonarqube ${ver:+--version "$ver"} \
+    --set community.enabled=true \
+    --set postgresql.enabled=true \
+    --set postgresql.primary.persistence.storageClass="$sc" \
+    --set persistence.enabled=true \
+    --set persistence.storageClass="$sc" \
+    --set persistence.size=10Gi \
+    --set service.type=ClusterIP \
+    --set monitoringPasscode="$pass" \
+    --set initSysctl.enabled=true \
+    --wait --timeout 10m >/dev/null 2>&1 \
+    || echo "    SonarQube helm reported a timeout/error — it is slow to start (ES); check: oc -n sonarqube get pods"
+
+  # route to the SonarQube web service (port 9000), named port 'http'
+  _make_route sonarqube sonarqube sonarqube-sonarqube http "$host"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  sonarqube   : https://$host  (default login admin/admin — change it on first login)
+                scans SOURCE CODE (SAST); pair with Harbor/Trivy (image CVEs)"
   return 0
 }
 
@@ -1336,7 +1402,8 @@ install_devops() {
     echo " 19) Sim:AWX      — Ansible project + job template, launched (automation)"
     echo " 20) Sim:CI/CD    — Jenkins->Harbor->GitLab->ArgoCD GitOps loop [heavy]"
     echo " 21) Sim:All      — GitOps + Events + AWX (light scenario subset)"
-    echo " 22) All          — all DevOps tools (no app simulations)"
+    echo " 22) SonarQube    — source-code quality / SAST (Helm; complements Harbor image scans)"
+    echo " 23) All          — all DevOps tools (no app simulations)"
     printf 'Selection [1 2 3]: '
     read -r DSEL; DSEL=${DSEL:-1 2 3}
     for n in $DSEL; do
@@ -1362,7 +1429,8 @@ install_devops() {
         19) selected="$selected appsim-awx" ;;
         20) selected="$selected appsim-cicd" ;;
         21) selected="$selected appsim-all" ;;
-        22) selected="cert-manager argocd jenkins gitlab harbor artifactory awx kafka kafka-kraft strimzi-kafka" ;;
+        22) selected="$selected sonarqube" ;;
+        23) selected="cert-manager argocd jenkins gitlab harbor artifactory awx sonarqube kafka kafka-kraft strimzi-kafka" ;;
       esac
     done
     # observability components install via Helm (single-binary) or via Operators;
@@ -1400,6 +1468,7 @@ install_devops() {
       harbor)  install_harbor  || true ;;
       artifactory|jfrog) install_artifactory || true ;;
       awx)     install_awx     || true ;;
+      sonarqube|sonar) install_sonarqube || true ;;
       kafka|zookeeper)   install_kafka || true ;;
       kafka-kraft|kraft) install_kafka_kraft || true ;;
       strimzi-kafka|strimzi) install_strimzi || true ;;
@@ -1417,7 +1486,7 @@ install_devops() {
       otel|otel-operator) ;;  # deferred below so Tempo exists first (OTLP target)
       observability|obs)      install_loki helm || true; install_tempo helm || true; install_otel helm || true ;;
       observability-operator) install_loki operator || true; install_tempo operator || true; install_otel operator || true ;;
-      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-all)" ;;
+      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, sonarqube, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-all)" ;;
     esac
   done
   # OpenTelemetry last: its OTLP exporter targets Tempo, so Tempo must be up

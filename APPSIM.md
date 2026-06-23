@@ -107,9 +107,13 @@ oc -n awx get secret awx-admin-password -o jsonpath='{.data.password}' | base64 
 The closed loop a real team runs:
 
 ```
-Jenkins pipeline ─(kaniko build)→ Harbor ─(image)→ ┐
+SonarQube (code scan) ─▶ Jenkins ─(kaniko build)→ Harbor ─(Trivy image scan)→ ┐
         └─(git tag bump)→ GitLab ─(values.yaml)→ ArgoCD ─(sync)→ app pod
 ```
+
+The pipeline includes a **SonarQube analysis** stage (if SonarQube is installed) and a
+**Trivy image-scan report** after the push — both report-only (they log results, don't
+fail the build). See **[SCANNING.md](SCANNING.md)** for image-vs-code scanning details.
 
 What the installer wires up:
 - **GitLab** repo `root/app-config` seeded with a tiny Helm chart whose `values.yaml`

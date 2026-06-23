@@ -48,7 +48,7 @@ Usage: ./deploy-okd.sh [options]
                     menu, or use --devops-components). Works on a fresh deploy
                     and on an already-running cluster.
   --devops-components LIST  comma list of: cert-manager,argocd,jenkins,gitlab,
-                    harbor,artifactory,awx,kafka,kafka-kraft,strimzi-kafka,
+                    harbor,artifactory,awx,sonarqube,kafka,kafka-kraft,strimzi-kafka,
                     appsim,loki,loki-operator,tempo,tempo-operator,otel,
                     otel-operator,observability,observability-operator,
                     appsim-gitops,appsim-boutique,appsim-events,appsim-awx,

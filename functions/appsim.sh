@@ -512,6 +512,27 @@ YAML
       --docker-server="$harbor_host" --docker-username="$rname" --docker-password="$rsecret" \
       --dry-run=client -o yaml | oc apply -f - >/dev/null
   fi
+  # auto-scan images pushed to 'appsim' (Trivy, report-only) — _harbor_autoscan is in devops.sh
+  _harbor_autoscan appsim "$harbor_host" "$hpw" >/dev/null 2>&1 \
+    && echo "    Harbor scan-on-push (Trivy) enabled for project 'appsim'"
+
+  # ── 2b) SonarQube (optional): if it's installed, provision a project + CI token
+  #        and a 'sonar-ci' secret the pipeline's analysis stage consumes. ──
+  if oc get ns sonarqube >/dev/null 2>&1 && oc -n sonarqube get route sonarqube >/dev/null 2>&1; then
+    local sqhost token; sqhost=$(oc -n sonarqube get route sonarqube -o jsonpath='{.spec.host}' 2>/dev/null)
+    curl -sk -u admin:admin -X POST "https://$sqhost/api/projects/create?project=appsim&name=appsim" >/dev/null 2>&1 || true
+    token=$(curl -sk -u admin:admin -X POST "https://$sqhost/api/user_tokens/generate?name=appsim-ci-$RANDOM" 2>/dev/null | jq -r '.token // empty')
+    if [ -n "$token" ]; then
+      oc -n "$ns" create secret generic sonar-ci \
+        --from-literal=SONAR_HOST_URL="http://sonarqube-sonarqube.sonarqube.svc:9000" \
+        --from-literal=SONAR_TOKEN="$token" --dry-run=client -o yaml | oc apply -f - >/dev/null
+      echo "    SonarQube project 'appsim' + CI token provisioned (sonar-ci secret)"
+    else
+      echo "    SonarQube present but token provisioning failed (admin pw changed?) — analysis stage will skip"
+    fi
+  else
+    echo "    SonarQube not installed — pipeline's analysis stage will skip (install with --devops-components sonarqube)"
+  fi
 
   # Trust Harbor's self-signed route so the kubelet can PULL the built image
   # (CRI-O rejects the router cert otherwise -> ImagePullBackOff x509). This edits
@@ -558,6 +579,33 @@ spec:
         secret: { secretName: harbor-push, items: [{ key: .dockerconfigjson, path: config.json }] }
 KJOB
 
+  # SonarQube analysis Job template (used only when the 'sonar-ci' secret exists):
+  # an initContainer clones the config repo, then sonar-scanner-cli submits analysis.
+  oc -n "$ns" create configmap sonar-job --dry-run=client -o yaml --from-file=job.yaml=/dev/stdin <<SJOB | oc apply -f - >/dev/null
+apiVersion: batch/v1
+kind: Job
+metadata: { name: sonar-scan, namespace: $ns }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+      - name: clone
+        image: alpine/git:latest
+        env: [{ name: GIT_SSL_NO_VERIFY, value: "true" }]
+        args: ["clone", "https://oauth2:$GL_TOKEN@gitlab.$ingd/root/app-config.git", "/src"]
+        volumeMounts: [{ name: src, mountPath: /src }]
+      containers:
+      - name: scanner
+        image: sonarsource/sonar-scanner-cli:latest
+        workingDir: /src
+        args: ["-Dsonar.projectKey=appsim", "-Dsonar.sources=/src"]
+        envFrom: [{ secretRef: { name: sonar-ci } }]
+        volumeMounts: [{ name: src, mountPath: /src }]
+      volumes: [{ name: src, emptyDir: {} }]
+SJOB
+
   # Jenkins pipeline (OpenShift-Sync turns this BuildConfig into a Jenkins job).
   # MUST live in the 'jenkins' namespace — the OpenShift Jenkins sync plugin only
   # watches Jenkins' own namespace. Runs on the Jenkins controller (has oc + the
@@ -576,12 +624,38 @@ spec:
           agent any
           environment { TAG = "v\${BUILD_NUMBER}" }
           stages {
+            stage('SonarQube analysis (SAST)') {
+              steps {
+                sh '''
+                  if oc -n $ns get secret sonar-ci >/dev/null 2>&1; then
+                    oc -n $ns delete job sonar-scan --ignore-not-found
+                    oc -n $ns get cm sonar-job -o go-template='{{index .data "job.yaml"}}' | oc -n $ns apply -f -
+                    oc -n $ns wait --for=condition=complete job/sonar-scan --timeout=300s || echo "sonar-scan did not complete (non-fatal)"
+                    oc -n $ns logs job/sonar-scan --tail=5 || true
+                  else
+                    echo "SonarQube not provisioned (no sonar-ci secret) — skipping code analysis"
+                  fi
+                '''
+              }
+            }
             stage('build & push image (kaniko)') {
               steps {
                 sh '''
                   oc -n $ns delete job kaniko-build --ignore-not-found
                   oc -n $ns get cm kaniko-job -o go-template='{{index .data "job.yaml"}}' | sed "s|__TAG__|\$TAG|g" | oc -n $ns apply -f -
                   oc -n $ns wait --for=condition=complete job/kaniko-build --timeout=400s
+                '''
+              }
+            }
+            stage('image scan report (Trivy via Harbor)') {
+              steps {
+                sh '''
+                  A="https://$harbor_host/api/v2.0/projects/appsim/repositories/app/artifacts/\$TAG"
+                  curl -sk -u "admin:$hpw" -X POST "\$A/scan" >/dev/null 2>&1 || true
+                  echo "waiting for Trivy scan..."; sleep 45
+                  echo "Trivy scan summary for $image:\$TAG :"
+                  curl -sk -u "admin:$hpw" "\$A?with_scan_overview=true" | tr "," "\\n" | grep -iE "scan_status|severity|total|fixable|Critical|High|Medium|Low" | head -15
+                  echo "(report-only - build not gated)"
                 '''
               }
             }
