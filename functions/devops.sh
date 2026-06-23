@@ -381,9 +381,15 @@ install_gitlab() {
   until oc get crd gitlabs.apps.gitlab.com >/dev/null 2>&1; do
     t=$((t+1)); [ $t -le 30 ] || { echo "    GitLab CRD never appeared"; return 1; }; sleep 5
   done
-  # Let the operator choose the bundled chart version (omit spec.chart.version).
-  # certmanager is disabled (none on the cluster); GitLab uses its bundled
-  # nginx-ingress with self-signed/shared certs under *.apps.<domain>.
+  # spec.chart.version is REQUIRED: gitlab-operator refuses to reconcile without it
+  # ("invalid version format : invalid semantic version") — and it must be one of
+  # the chart versions the *installed* operator supports (see the operator's
+  # CHART_VERSIONS file for its tag). Default suits the N-2-pinned operator (3.0.x,
+  # which supports 9.10.x/9.11.x/10.0.x); override GITLAB_CHART_VERSION if you change
+  # VERSION_POLICY or the operator version. certmanager is disabled (none on the
+  # cluster); GitLab uses its bundled nginx-ingress with shared certs under *.apps.
+  local glchart=${GITLAB_CHART_VERSION:-9.11.5}
+  echo "    GitLab chart version: $glchart (override with GITLAB_CHART_VERSION)"
   oc apply -f - >/dev/null <<GCR
 apiVersion: apps.gitlab.com/v1beta1
 kind: GitLab
@@ -392,6 +398,7 @@ metadata:
   namespace: gitlab-system
 spec:
   chart:
+    version: "$glchart"
     values:
       global:
         hosts:

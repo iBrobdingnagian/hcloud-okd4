@@ -443,15 +443,25 @@ install_appsim_cicd() {
                  once 'oc -n gitlab-system get pods' is all Running."
     return 0
   fi
-  local glhost; glhost=$(oc -n gitlab-system get route -o jsonpath='{range .items[*]}{.spec.host}{"\n"}{end}' 2>/dev/null | grep '^gitlab\.' | head -1)
+  # GitLab ships its OWN bundled nginx-ingress (a LoadBalancer with no external IP
+  # on platform 'none') instead of an OpenShift Route, so it isn't reachable at
+  # *.apps. Add an edge Route to the webservice/workhorse (8181 serves UI+API+git)
+  # so both this host and in-cluster ArgoCD/Jenkins can reach it at gitlab.<apps>.
   local glpw; glpw=$(oc -n gitlab-system get secret gitlab-gitlab-initial-root-password -o jsonpath='{.data.password}' 2>/dev/null | base64 -d)
-  [ -n "$glhost" ] && [ -n "$glpw" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
-  appsim-cicd  : FAILED — GitLab not ready (route/root password missing); re-run later"; return 1; }
-  local GL="https://$glhost"
+  [ -n "$glpw" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-cicd  : FAILED — GitLab root password secret not found; re-run later"; return 1; }
+  _make_route gitlab-system gitlab-ext gitlab-webservice-default http-workhorse "gitlab.$ingd"
+  local GL="https://gitlab.$ingd"
+  echo "    waiting for GitLab to answer at $GL"
+  local t=0
+  until [ "$(curl -sk -o /dev/null -w '%{http_code}' "$GL/-/health")" = 200 ]; do
+    t=$((t+1)); [ $t -le 60 ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-cicd  : FAILED — GitLab not reachable at $GL yet; re-run once its pods are all Running"; return 1; }; sleep 5
+  done
   GL_TOKEN=$(_gitlab_token "$GL" "$glpw")
   [ -n "$GL_TOKEN" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
-  appsim-cicd  : FAILED — could not get a GitLab API token (enable OAuth password grant,
-                 or create a root PAT manually) — see GitLab admin settings"; return 1; }
+  appsim-cicd  : FAILED — could not get a GitLab API token (OAuth password grant);
+                 create a root PAT manually and re-run"; return 1; }
 
   _devops_ns "$ns"
   oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
@@ -462,14 +472,32 @@ install_appsim_cicd() {
     -d '{"name":"app-config","path":"app-config","visibility":"internal","initialize_with_readme":true}' >/dev/null 2>&1 || true
   local proj; proj=$(_glapi "$GL/api/v4/projects?search=app-config" | jq -r '.[0].id // empty')
   if [ -n "$proj" ]; then
-    # seed Chart.yaml + values.yaml + a Deployment template (image.tag is what CI bumps)
-    _glcommit() { _glapi -X POST "$GL/api/v4/projects/$proj/repository/files/$1" \
-      -d "$(jq -n --arg c "$2" '{branch:"main",content:$c,commit_message:"seed "+env.f}')" >/dev/null 2>&1; }
-    f=Chart.yaml      _glcommit "Chart%2Eyaml"             $'apiVersion: v2\nname: appsim-app\nversion: 0.1.0'
-    f=values.yaml     _glcommit "values%2Eyaml"            "image:\n  repository: $image\n  tag: $APPSIM_CICD_APP_TAG"
-    f=deploy.yaml     _glcommit "templates%2Fdeploy%2Eyaml" $'apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: app }\nspec:\n  replicas: 1\n  selector: { matchLabels: { app: appsim-app } }\n  template:\n    metadata: { labels: { app: appsim-app } }\n    spec:\n      containers:\n      - name: app\n        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"\n        ports: [{ containerPort: 8080 }]'
+    # commit a file (create, or update if it already exists). $1=url-encoded path, $2=content
+    _glcommit() {
+      local body; body=$(jq -n --arg c "$2" '{branch:"main",content:$c,commit_message:"seed"}')
+      _glapi -X POST "$GL/api/v4/projects/$proj/repository/files/$1" -d "$body" >/dev/null 2>&1 \
+        || _glapi -X PUT "$GL/api/v4/projects/$proj/repository/files/$1" -d "$body" >/dev/null 2>&1
+    }
+    _glcommit "Chart%2Eyaml" "$(printf 'apiVersion: v2\nname: appsim-app\nversion: 0.1.0\n')"
+    _glcommit "values%2Eyaml" "$(printf 'image:\n  repository: %s\n  tag: %s\n' "$image" "$APPSIM_CICD_APP_TAG")"
+    _glcommit "templates%2Fdeploy%2Eyaml" "$(cat <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: app }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: appsim-app } }
+  template:
+    metadata: { labels: { app: appsim-app } }
+    spec:
+      containers:
+      - name: app
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        ports: [{ containerPort: 8080 }]
+YAML
+)"
   fi
-  local repoURL="$GL/appsim/app-config.git"
+  local repoURL="$GL/root/app-config.git"
 
   # ── 2) Harbor project 'appsim' + robot account (push creds) ──
   local hpw; hpw=$(oc -n harbor get secret harbor-core -o jsonpath='{.data.HARBOR_ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
@@ -485,25 +513,60 @@ install_appsim_cicd() {
       --dry-run=client -o yaml | oc apply -f - >/dev/null
   fi
 
-  # ── 3) image BuildConfig (Docker strategy) -> Harbor, + a Jenkins pipeline BC ──
+  # Trust Harbor's self-signed route so the kubelet can PULL the built image
+  # (CRI-O rejects the router cert otherwise -> ImagePullBackOff x509). This edits
+  # the cluster image config and, the FIRST time only, triggers a MachineConfig
+  # rollout (nodes drain+reboot, ~10-15 min). Idempotent: skips if already set.
+  if ! oc get image.config.openshift.io/cluster -o jsonpath='{.spec.registrySources.insecureRegistries}' 2>/dev/null | grep -q "$harbor_host"; then
+    echo "    adding $harbor_host to cluster insecureRegistries (one-time node rollout/reboot)"
+    oc get image.config.openshift.io/cluster -o json 2>/dev/null \
+      | jq --arg h "$harbor_host" '.spec.registrySources.insecureRegistries = ((.spec.registrySources.insecureRegistries // []) + [$h] | unique)' \
+      | oc apply -f - >/dev/null 2>&1 || true
+  fi
+
+  # ── 3) image build via kaniko (no internal registry on platform 'none', so an
+  #       OpenShift Docker BuildConfig can't run — kaniko is daemonless and pushes
+  #       straight to Harbor with the robot secret). Ship a Dockerfile + a kaniko
+  #       Job template (configmap, __TAG__ placeholder) the pipeline renders+runs. ──
+  oc -n "$ns" create configmap appsim-dockerfile \
+    --from-literal=Dockerfile=$'FROM ghcr.io/stefanprodan/podinfo:latest\nLABEL appsim=cicd' \
+    --dry-run=client -o yaml | oc apply -f - >/dev/null
+  oc -n "$ns" create configmap kaniko-job --dry-run=client -o yaml --from-file=job.yaml=/dev/stdin <<KJOB | oc apply -f - >/dev/null
+apiVersion: batch/v1
+kind: Job
+metadata: { name: kaniko-build, namespace: $ns }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - --dockerfile=/wt/Dockerfile
+        - --context=dir:///wt
+        - --destination=$image:__TAG__
+        - --skip-tls-verify
+        - --skip-tls-verify-pull
+        volumeMounts:
+        - { name: dockerfile, mountPath: /wt }
+        - { name: dockercfg, mountPath: /kaniko/.docker }
+      volumes:
+      - { name: dockerfile, configMap: { name: appsim-dockerfile } }
+      - name: dockercfg
+        secret: { secretName: harbor-push, items: [{ key: .dockerconfigjson, path: config.json }] }
+KJOB
+
+  # Jenkins pipeline (OpenShift-Sync turns this BuildConfig into a Jenkins job).
+  # MUST live in the 'jenkins' namespace — the OpenShift Jenkins sync plugin only
+  # watches Jenkins' own namespace. Runs on the Jenkins controller (has oc + the
+  # jenkins SA, granted edit in $ns): renders the kaniko Job for this build's tag,
+  # waits for it, then bumps the GitLab tag (all targeting $ns cross-namespace).
   oc apply -f - >/dev/null <<BC
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
-metadata: { name: appsim-app, namespace: $ns }
-spec:
-  source:
-    type: Dockerfile
-    dockerfile: |
-      FROM ghcr.io/stefanprodan/podinfo:latest
-      LABEL appsim=cicd
-  strategy: { type: Docker }
-  output:
-    to: { kind: DockerImage, name: "$image:$APPSIM_CICD_APP_TAG" }
-    pushSecret: { name: harbor-push }
----
-apiVersion: build.openshift.io/v1
-kind: BuildConfig
-metadata: { name: appsim-pipeline, namespace: $ns }
+metadata: { name: appsim-pipeline, namespace: jenkins }
 spec:
   strategy:
     type: JenkinsPipeline
@@ -513,16 +576,25 @@ spec:
           agent any
           environment { TAG = "v\${BUILD_NUMBER}" }
           stages {
-            stage('build & push image') {
-              steps { sh 'oc start-build appsim-app --follow -n $ns' }
+            stage('build & push image (kaniko)') {
+              steps {
+                sh '''
+                  oc -n $ns delete job kaniko-build --ignore-not-found
+                  oc -n $ns get cm kaniko-job -o go-template='{{index .data "job.yaml"}}' | sed "s|__TAG__|\$TAG|g" | oc -n $ns apply -f -
+                  oc -n $ns wait --for=condition=complete job/kaniko-build --timeout=400s
+                '''
+              }
             }
             stage('bump GitOps tag') {
               steps {
                 sh '''
-                  git clone $repoURL cfg && cd cfg
-                  sed -i "s/  tag: .*/  tag: \${TAG}/" values.yaml
-                  git -c user.email=ci@appsim -c user.name=ci commit -am "ci: image \${TAG}" || true
-                  git push origin main || true
+                  git config --global http.sslVerify false
+                  rm -rf cfg
+                  git clone https://oauth2:$GL_TOKEN@gitlab.$ingd/root/app-config.git cfg
+                  cd cfg
+                  sed -i "s|  tag:.*|  tag: \$TAG|" values.yaml
+                  git -c user.email=ci@appsim -c user.name=ci commit -am "ci: image \$TAG" || true
+                  git push origin HEAD:main || true
                 '''
               }
             }
@@ -543,13 +615,16 @@ stringData:
   url: $repoURL
   username: root
   password: $GL_TOKEN
+  insecure: "true"
 RC
+  # the Jenkins SA (ns jenkins) drives `oc start-build` in this ns -> needs edit here
+  oc adm policy add-role-to-user edit system:serviceaccount:jenkins:jenkins -n "$ns" >/dev/null 2>&1 || true
   _argocd_app appsim-cicd "$ns" "$repoURL" . main
 
   DEVOPS_NOTE="$DEVOPS_NOTE
   appsim-cicd  : loop wired (EXPERIMENTAL). GitLab repo $repoURL, Harbor project 'appsim',
                  image BuildConfig 'appsim-app', Jenkins pipeline 'appsim-pipeline',
-                 ArgoCD app 'appsim-cicd'. Trigger a run: oc -n $ns start-build appsim-pipeline
+                 ArgoCD app 'appsim-cicd'. Trigger a run: oc -n jenkins start-build appsim-pipeline
                  -> new image tag in Harbor -> commit in GitLab -> ArgoCD syncs ns $ns"
   return 0
 }
