@@ -1322,7 +1322,14 @@ install_devops() {
     echo " 13) Tempo        — traces (Tempo; Helm single-binary or Operator)"
     echo " 14) OTel         — OpenTelemetry Collector (traces->Tempo, metrics->UWM)"
     echo " 15) Observability— Loki + Tempo + OTel together"
-    echo " 16) All"
+    echo "  -- application simulations (real-world scenarios) --"
+    echo " 16) Sim:GitOps   — podinfo deployed by ArgoCD (Helm from Git) + traffic"
+    echo " 17) Sim:Boutique — Online Boutique: 11 microservices + Locust loadgen [heavy]"
+    echo " 18) Sim:Events   — Kafka pipeline producer->streams->consumer (Strimzi clients)"
+    echo " 19) Sim:AWX      — Ansible project + job template, launched (automation)"
+    echo " 20) Sim:CI/CD    — Jenkins->Harbor->GitLab->ArgoCD GitOps loop [heavy]"
+    echo " 21) Sim:All      — GitOps + Events + AWX (light scenario subset)"
+    echo " 22) All          — all DevOps tools (no app simulations)"
     printf 'Selection [1 2 3]: '
     read -r DSEL; DSEL=${DSEL:-1 2 3}
     for n in $DSEL; do
@@ -1342,7 +1349,13 @@ install_devops() {
         13) selected="$selected tempo" ;;
         14) selected="$selected otel" ;;
         15) selected="$selected observability" ;;
-        16) selected="cert-manager argocd jenkins gitlab harbor artifactory awx kafka kafka-kraft strimzi-kafka" ;;
+        16) selected="$selected appsim-gitops" ;;
+        17) selected="$selected appsim-boutique" ;;
+        18) selected="$selected appsim-events" ;;
+        19) selected="$selected appsim-awx" ;;
+        20) selected="$selected appsim-cicd" ;;
+        21) selected="$selected appsim-all" ;;
+        22) selected="cert-manager argocd jenkins gitlab harbor artifactory awx kafka kafka-kraft strimzi-kafka" ;;
       esac
     done
     # observability components install via Helm (single-binary) or via Operators;
@@ -1384,6 +1397,12 @@ install_devops() {
       kafka-kraft|kraft) install_kafka_kraft || true ;;
       strimzi-kafka|strimzi) install_strimzi || true ;;
       appsim|app-sim|application-simulation) install_appsim || true ;;
+      appsim-gitops)   install_appsim_gitops   || true ;;
+      appsim-boutique) install_appsim_boutique || true ;;
+      appsim-events)   install_appsim_events   || true ;;
+      appsim-awx)      install_appsim_awx      || true ;;
+      appsim-cicd)     install_appsim_cicd     || true ;;
+      appsim-all)      install_appsim_gitops || true; install_appsim_events || true; install_appsim_awx || true ;;
       loki)            install_loki  helm     || true ;;
       loki-operator)   install_loki  operator || true ;;
       tempo)           install_tempo helm     || true ;;
@@ -1391,7 +1410,7 @@ install_devops() {
       otel|otel-operator) ;;  # deferred below so Tempo exists first (OTLP target)
       observability|obs)      install_loki helm || true; install_tempo helm || true; install_otel helm || true ;;
       observability-operator) install_loki operator || true; install_tempo operator || true; install_otel operator || true ;;
-      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator])" ;;
+      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-all)" ;;
     esac
   done
   # OpenTelemetry last: its OTLP exporter targets Tempo, so Tempo must be up

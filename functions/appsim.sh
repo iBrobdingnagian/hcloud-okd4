@@ -1,0 +1,555 @@
+#!/usr/bin/env bash
+# functions/appsim.sh — real-world application-simulation scenarios
+# Sourced by deploy-okd.sh; not meant to be executed directly.
+#
+# Extends the single Kafka traffic generator (install_appsim, functions/devops.sh)
+# into a SUITE of simulations that exercise the DevOps toolchain the repo installs,
+# the way real deployments would:
+#
+#   appsim-gitops    podinfo + helm-guestbook deployed by ArgoCD from Git (+ traffic)
+#   appsim-boutique  GoogleCloud "Online Boutique" (11 microservices + Locust loadgen)
+#   appsim-events    Strimzi/Kafka java client-examples (producer/consumer/streams)
+#   appsim-awx       an AWX project + job-template playbook that automates a cluster action
+#   appsim-cicd      full CI/CD GitOps loop: Jenkins (kaniko) -> Harbor -> GitLab -> ArgoCD
+#
+# Each installer is best-effort (EXPERIMENTAL), self-bootstraps its prerequisite tool
+# (like install_appsim calls install_kafka/install_strimzi), reuses functions/devops.sh
+# helpers (_devops_ns, _default_sc, _ingress_domain, _make_route, _api_url,
+# ensure_storage_backend, _strimzi_app_user) and appends to DEVOPS_NOTE.
+
+# ── ArgoCD helpers ─────────────────────────────────────────────────────────
+# ensure the ArgoCD operator + an ArgoCD instance named 'argocd' are present
+_appsim_need_argocd() {
+  if oc get crd applications.argoproj.io >/dev/null 2>&1 \
+     && oc -n argocd get argocd argocd >/dev/null 2>&1; then return 0; fi
+  install_argocd
+  local t=0
+  until oc get crd applications.argoproj.io >/dev/null 2>&1; do
+    t=$((t+1)); [ $t -le 30 ] || return 1; sleep 5
+  done
+}
+
+# _argocd_app <name> <dest-ns> <repoURL> <path> <revision> [helm-values]
+# create an Application (auto-sync, prune, selfHeal, CreateNamespace) in the argocd
+# namespace and label the destination ns so the operator grants the controller RBAC.
+_argocd_app() {
+  local name=$1 dns=$2 repo=$3 path=$4 rev=$5 vals=${6:-} helmblock=""
+  _devops_ns "$dns"
+  oc label ns "$dns" argocd.argoproj.io/managed-by=argocd --overwrite >/dev/null 2>&1 || true
+  if [ -n "$vals" ]; then
+    # helm: aligns with repoURL/path (4 spaces under source:); values content 8 spaces
+    helmblock="
+    helm:
+      values: |
+$(printf '%s\n' "$vals" | sed 's/^/        /')"
+  fi
+  oc apply -f - >/dev/null <<APP
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: $name
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: $repo
+    path: $path
+    targetRevision: $rev$helmblock
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: $dns
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
+APP
+}
+
+# ── appsim-gitops: podinfo via ArgoCD ──────────────────────────────────────
+PODINFO_REPO=${PODINFO_REPO:-https://github.com/stefanprodan/podinfo}
+
+install_appsim_gitops() {
+  log "AppSim/GitOps: podinfo deployed by ArgoCD (Helm chart from Git)"
+  _appsim_need_argocd || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-gitops: FAILED — ArgoCD unavailable"; return 1; }
+  local ns=appsim-gitops ingd; ingd=$(_ingress_domain)
+
+  # podinfo: Helm chart straight from its git repo (no chart-version pin needed).
+  # Canonical GitOps demo, runs cleanly under OpenShift's restricted SCC.
+  _argocd_app podinfo "$ns" "$PODINFO_REPO" charts/podinfo master "ui:
+  message: \"deployed by ArgoCD (appsim-gitops)\"
+serviceMonitor:
+  enabled: false"
+
+  # give ArgoCD a moment to create the podinfo Service, then route + traffic-gen
+  local t=0
+  until oc -n "$ns" get svc podinfo >/dev/null 2>&1; do
+    t=$((t+1)); [ $t -le 36 ] || { echo "    podinfo Service not synced yet — ArgoCD will reconcile; check: oc -n argocd get app podinfo"; break; }
+    sleep 5
+  done
+  [ -n "$ingd" ] && oc -n "$ns" get svc podinfo >/dev/null 2>&1 && _make_route "$ns" podinfo podinfo http "podinfo.$ingd"
+
+  # traffic generator: hammer podinfo's endpoints so dashboards/metrics show load
+  oc apply -f - >/dev/null <<'TG'
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: traffic-gen, namespace: appsim-gitops }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: traffic-gen } }
+  template:
+    metadata: { labels: { app: traffic-gen } }
+    spec:
+      containers:
+      - name: curl
+        image: curlimages/curl:latest
+        command: ["/bin/sh","-c"]
+        args:
+        - |
+          base=http://podinfo.appsim-gitops.svc:9898
+          while true; do
+            curl -s -o /dev/null "$base/" || true
+            curl -s -o /dev/null "$base/api/info" || true
+            curl -s -o /dev/null "$base/healthz" || true
+            curl -s -o /dev/null "$base/delay/1" || true
+            sleep 1
+          done
+        resources:
+          requests: { cpu: 20m, memory: 32Mi }
+          limits:   { memory: 64Mi }
+TG
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-gitops: ArgoCD app 'podinfo' in ns $ns (oc -n argocd get app podinfo)
+                 podinfo: ${ingd:+https://podinfo.$ingd}  traffic-gen running"
+  return 0
+}
+
+# ── appsim-boutique: GoogleCloud Online Boutique via ArgoCD ────────────────
+BOUTIQUE_REPO=${BOUTIQUE_REPO:-https://github.com/GoogleCloudPlatform/microservices-demo}
+
+install_appsim_boutique() {
+  log "AppSim/Boutique: Online Boutique (11 microservices + Locust) via ArgoCD — heavy/EXPERIMENTAL"
+  _appsim_need_argocd || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-boutique: FAILED — ArgoCD unavailable"; return 1; }
+  local ns=appsim-boutique ingd; ingd=$(_ingress_domain)
+  _devops_ns "$ns"
+  # some Boutique containers expect fixed/non-root uids — anyuid (RunAsAny) admits them
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
+
+  _argocd_app boutique "$ns" "$BOUTIQUE_REPO" helm-chart main
+
+  # route to the storefront once ArgoCD has created the frontend Service
+  local t=0
+  until oc -n "$ns" get svc frontend >/dev/null 2>&1; do
+    t=$((t+1)); [ $t -le 48 ] || { echo "    frontend Service not synced yet — check: oc -n argocd get app boutique"; break; }
+    sleep 5
+  done
+  [ -n "$ingd" ] && oc -n "$ns" get svc frontend >/dev/null 2>&1 && _make_route "$ns" boutique frontend http "boutique.$ingd"
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-boutique: ArgoCD app 'boutique' in ns $ns (~11 services + built-in Locust loadgen)
+                   store: ${ingd:+https://boutique.$ingd}  (heavy — give it a few minutes)"
+  return 0
+}
+
+# ── appsim-events: Kafka event pipeline (Strimzi java client-examples) ──────
+# Real Java clients (richer than the console-script appsim): producer -> source
+# topic -> Kafka Streams (uppercases) -> target topic -> consumer. Backend is
+# classic Kafka (plaintext) or Strimzi (mTLS), like install_appsim.
+EVENTS_PRODUCER_IMAGE=${EVENTS_PRODUCER_IMAGE:-quay.io/strimzi-examples/java-kafka-producer:latest}
+EVENTS_CONSUMER_IMAGE=${EVENTS_CONSUMER_IMAGE:-quay.io/strimzi-examples/java-kafka-consumer:latest}
+EVENTS_STREAMS_IMAGE=${EVENTS_STREAMS_IMAGE:-quay.io/strimzi-examples/java-kafka-streams:latest}
+
+# dedicated Strimzi user for the events pipeline: broad-but-scoped ACLs over the
+# 'appsim' prefix (covers source/target topics, the consumer group, and the
+# Streams app's internal changelog/repartition topics named <app-id>-*).
+_events_strimzi_user() {
+  oc apply -f - >/dev/null <<USR
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaUser
+metadata:
+  name: events-user
+  namespace: strimzi
+  labels: { strimzi.io/cluster: my-cluster }
+spec:
+  authentication: { type: tls }
+  authorization:
+    type: simple
+    acls:
+    - resource: { type: topic, name: appsim, patternType: prefix }
+      operations: [Create, Describe, Read, Write]
+    - resource: { type: group, name: appsim, patternType: prefix }
+      operations: [Read, Describe]
+    - resource: { type: cluster }
+      operations: [DescribeConfigs]
+USR
+}
+
+install_appsim_events() {
+  log "AppSim/Events: Kafka pipeline producer -> streams -> consumer (Strimzi java clients)"
+  local backend=${APPSIM_BACKEND:-}
+  if [ -z "$backend" ]; then
+    if [ "$ASSUME_YES" = 1 ] || [ -n "$FLAG_DEVOPS_COMPONENTS" ]; then backend=kafka
+    else
+      echo "    Backend? 1) Kafka+ZooKeeper (classic)  2) Strimzi (operator, mTLS)"
+      printf '    Backend [1]: '; read -r B; case "${B:-1}" in 2) backend=strimzi ;; *) backend=kafka ;; esac
+    fi
+  fi
+  local ns=appsim-events; _devops_ns "$ns"
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
+
+  local BOOT tls=0
+  if [ "$backend" = strimzi ]; then
+    oc get kafka my-cluster -n strimzi >/dev/null 2>&1 || install_strimzi || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-events: FAILED — Strimzi backend unavailable"; return 1; }
+    _events_strimzi_user
+    oc -n strimzi wait kafkauser/events-user --for=condition=Ready --timeout=300s 2>/dev/null \
+      || echo "    events-user not Ready yet — clients will retry"
+    # KafkaTopics (topic operator); Streams also makes internal appsim-streams-* topics
+    local kt
+    for kt in appsim-events appsim-events-out; do
+      oc apply -f - >/dev/null <<TOP
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata: { name: $kt, namespace: strimzi, labels: { strimzi.io/cluster: my-cluster } }
+spec: { partitions: 3, replicas: 1 }
+TOP
+    done
+    # copy cluster CA + user cert into the app namespace (cross-ns mount isn't allowed)
+    local s
+    for s in my-cluster-cluster-ca-cert events-user; do
+      oc -n strimzi get secret "$s" -o json 2>/dev/null \
+        | jq 'del(.metadata.namespace,.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.ownerReferences,.metadata.managedFields,.status)' \
+        | oc -n "$ns" apply -f - >/dev/null 2>&1 || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-events: FAILED — could not copy Strimzi secret '$s'"; return 1; }
+    done
+    BOOT="my-cluster-kafka-bootstrap.strimzi.svc:9093"; tls=1
+  else
+    backend=kafka
+    oc -n kafka get statefulset kafka >/dev/null 2>&1 || install_kafka || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-events: FAILED — Kafka+ZooKeeper backend unavailable"; return 1; }
+    BOOT="kafka.kafka.svc.cluster.local:9092"
+  fi
+  echo "    backend: $backend   bootstrap: $BOOT$([ "$tls" = 1 ] && echo '   (mTLS as events-user)')"
+
+  # TLS env + cert mounts (Strimzi only); the java images read any KAFKA_* env as
+  # Kafka client config (dots -> underscores), so mTLS is pure env + mounted p12s.
+  local tlsenv="" tlsvol="" tlsmnt=""
+  if [ "$tls" = 1 ]; then
+    tlsenv="
+        - { name: KAFKA_SECURITY_PROTOCOL,      value: SSL }
+        - { name: KAFKA_SSL_TRUSTSTORE_TYPE,    value: PKCS12 }
+        - { name: KAFKA_SSL_TRUSTSTORE_LOCATION, value: /certs/ca/ca.p12 }
+        - { name: KAFKA_SSL_TRUSTSTORE_PASSWORD, valueFrom: { secretKeyRef: { name: my-cluster-cluster-ca-cert, key: ca.password } } }
+        - { name: KAFKA_SSL_KEYSTORE_TYPE,      value: PKCS12 }
+        - { name: KAFKA_SSL_KEYSTORE_LOCATION,  value: /certs/user/user.p12 }
+        - { name: KAFKA_SSL_KEYSTORE_PASSWORD,  valueFrom: { secretKeyRef: { name: events-user, key: user.password } } }"
+    tlsmnt="
+        volumeMounts:
+        - { name: ca,   mountPath: /certs/ca,   readOnly: true }
+        - { name: user, mountPath: /certs/user, readOnly: true }"
+    tlsvol="
+      volumes:
+      - { name: ca,   secret: { secretName: my-cluster-cluster-ca-cert, items: [{ key: ca.p12, path: ca.p12 }] } }
+      - { name: user, secret: { secretName: events-user, items: [{ key: user.p12, path: user.p12 }] } }"
+  fi
+
+  oc apply -f - >/dev/null <<EV
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: kafka-producer, namespace: $ns }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: kafka-producer } }
+  template:
+    metadata: { labels: { app: kafka-producer } }
+    spec:
+      containers:
+      - name: producer
+        image: $EVENTS_PRODUCER_IMAGE
+        env:
+        - { name: KAFKA_BOOTSTRAP_SERVERS, value: "$BOOT" }
+        - { name: KAFKA_KEY_SERIALIZER,    value: org.apache.kafka.common.serialization.StringSerializer }
+        - { name: KAFKA_VALUE_SERIALIZER,  value: org.apache.kafka.common.serialization.StringSerializer }
+        - { name: STRIMZI_TOPIC,           value: appsim-events }
+        - { name: STRIMZI_DELAY_MS,        value: "500" }
+        - { name: STRIMZI_MESSAGE_COUNT,   value: "1000000000" }
+        - { name: STRIMZI_LOG_LEVEL,       value: INFO }$tlsenv$tlsmnt
+        resources: { requests: { cpu: 50m, memory: 256Mi }, limits: { memory: 512Mi } }$tlsvol
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: kafka-streams, namespace: $ns }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: kafka-streams } }
+  template:
+    metadata: { labels: { app: kafka-streams } }
+    spec:
+      containers:
+      - name: streams
+        image: $EVENTS_STREAMS_IMAGE
+        env:
+        - { name: KAFKA_BOOTSTRAP_SERVERS, value: "$BOOT" }
+        - { name: KAFKA_APPLICATION_ID,    value: appsim-streams }
+        - { name: STRIMZI_SOURCE_TOPIC,    value: appsim-events }
+        - { name: STRIMZI_TARGET_TOPIC,    value: appsim-events-out }
+        - { name: STRIMZI_LOG_LEVEL,       value: INFO }$tlsenv$tlsmnt
+        resources: { requests: { cpu: 50m, memory: 384Mi }, limits: { memory: 768Mi } }$tlsvol
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: kafka-consumer, namespace: $ns }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: kafka-consumer } }
+  template:
+    metadata: { labels: { app: kafka-consumer } }
+    spec:
+      containers:
+      - name: consumer
+        image: $EVENTS_CONSUMER_IMAGE
+        env:
+        - { name: KAFKA_BOOTSTRAP_SERVERS,   value: "$BOOT" }
+        - { name: KAFKA_KEY_DESERIALIZER,    value: org.apache.kafka.common.serialization.StringDeserializer }
+        - { name: KAFKA_VALUE_DESERIALIZER,  value: org.apache.kafka.common.serialization.StringDeserializer }
+        - { name: STRIMZI_TOPIC,             value: appsim-events-out }
+        - { name: KAFKA_GROUP_ID,            value: appsim-events-cg }
+        - { name: STRIMZI_MESSAGE_COUNT,     value: "1000000000" }
+        - { name: STRIMZI_LOG_LEVEL,         value: INFO }$tlsenv$tlsmnt
+        resources: { requests: { cpu: 50m, memory: 256Mi }, limits: { memory: 512Mi } }$tlsvol
+EV
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-events: producer->streams->consumer in ns $ns (backend: $backend$([ "$tls" = 1 ] && echo ', mTLS'))
+                 watch: oc -n $ns logs deploy/kafka-consumer -f"
+  return 0
+}
+
+# ── appsim-awx: Ansible automation (AWX project + job template, launched) ───
+# Drives AWX through its REST API: creates an inventory + project (SCM) + job
+# template and launches a job. Defaults to the well-known ansible-tower-samples
+# repo (hello_world.yml) so it runs with no extra credentials; override
+# AWX_PROJECT_REPO / AWX_PLAYBOOK to run a cluster-action playbook instead.
+AWX_PROJECT_REPO=${AWX_PROJECT_REPO:-https://github.com/ansible/ansible-tower-samples}
+AWX_PLAYBOOK=${AWX_PLAYBOOK:-hello_world.yml}
+
+_awx_api() {  # _awx_api <method> <path> [json-body]
+  if [ -n "${3:-}" ]; then
+    curl -sk -u "admin:$AWX_PASS" -H 'Content-Type: application/json' -X "$1" "$AWX_API$2" -d "$3"
+  else
+    curl -sk -u "admin:$AWX_PASS" -X "$1" "$AWX_API$2"
+  fi
+}
+_awx_id() {  # _awx_id <resource> <name>  -> existing id (or empty)
+  _awx_api GET "/$1/?name=$(printf '%s' "$2" | sed 's/ /%20/g')" 2>/dev/null | jq -r '.results[0].id // empty'
+}
+
+install_appsim_awx() {
+  log "AppSim/AWX: Ansible project + job template + launch (automation)"
+  oc get ns awx >/dev/null 2>&1 && oc -n awx get awx awx >/dev/null 2>&1 || install_awx || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-awx   : FAILED — AWX unavailable"; return 1; }
+  local host; host=$(oc -n awx get route awx -o jsonpath='{.spec.host}' 2>/dev/null)
+  AWX_PASS=$(oc -n awx get secret awx-admin-password -o jsonpath='{.data.password}' 2>/dev/null | base64 -d)
+  [ -n "$host" ] && [ -n "$AWX_PASS" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-awx   : FAILED — AWX route/admin password not found"; return 1; }
+  AWX_API="https://$host/api/v2"
+
+  echo "    waiting for the AWX API at https://$host"
+  local t=0
+  until [ "$(curl -sk -o /dev/null -w '%{http_code}' -u "admin:$AWX_PASS" "$AWX_API/ping/")" = 200 ]; do
+    t=$((t+1)); [ $t -le 60 ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-awx   : FAILED — AWX API not reachable yet (try again later)"; return 1; }; sleep 5
+  done
+
+  local org inv proj jt
+  org=$(_awx_api GET "/organizations/?name=Default" | jq -r '.results[0].id // 1')
+  # inventory + localhost host (local connection)
+  inv=$(_awx_id inventories "AppSim")
+  [ -n "$inv" ] || inv=$(_awx_api POST /inventories/ "{\"name\":\"AppSim\",\"organization\":$org}" | jq -r '.id')
+  if [ "$(_awx_api GET "/inventories/$inv/hosts/?name=localhost" | jq -r '.count')" = 0 ]; then
+    _awx_api POST "/inventories/$inv/hosts/" \
+      '{"name":"localhost","variables":"ansible_connection: local\nansible_python_interpreter: \"{{ ansible_playbook_python }}\""}' >/dev/null
+  fi
+  # project (SCM git) — AWX auto-syncs on create; wait for status successful
+  proj=$(_awx_id projects "AppSim Samples")
+  [ -n "$proj" ] || proj=$(_awx_api POST /projects/ \
+    "{\"name\":\"AppSim Samples\",\"organization\":$org,\"scm_type\":\"git\",\"scm_url\":\"$AWX_PROJECT_REPO\",\"scm_update_on_launch\":false}" | jq -r '.id')
+  echo "    syncing AWX project (id $proj)"
+  t=0
+  until [ "$(_awx_api GET "/projects/$proj/" | jq -r '.status')" = successful ]; do
+    t=$((t+1)); [ $t -le 36 ] || { echo "    project still syncing — job template create may lag"; break; }; sleep 5
+  done
+  # job template
+  jt=$(_awx_id job_templates "AppSim Hello")
+  [ -n "$jt" ] || jt=$(_awx_api POST /job_templates/ \
+    "{\"name\":\"AppSim Hello\",\"job_type\":\"run\",\"inventory\":$inv,\"project\":$proj,\"playbook\":\"$AWX_PLAYBOOK\"}" | jq -r '.id')
+  # launch it and wait for the job to finish
+  local job jobstatus=unknown
+  job=$(_awx_api POST "/job_templates/$jt/launch/" "{}" | jq -r '.id // .job // empty')
+  if [ -n "$job" ]; then
+    echo "    launched job $job; waiting for it to finish"
+    t=0
+    while :; do
+      jobstatus=$(_awx_api GET "/jobs/$job/" | jq -r '.status')
+      case "$jobstatus" in successful|failed|error|canceled) break ;; esac
+      t=$((t+1)); [ $t -le 36 ] || break; sleep 5
+    done
+  fi
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-awx   : https://$host  (admin / see secret awx-admin-password)
+                 project 'AppSim Samples', job template 'AppSim Hello' launched -> $jobstatus
+                 re-launch: Templates -> AppSim Hello -> Launch (or POST job_templates/$jt/launch/)"
+  return 0
+}
+
+# ── appsim-cicd: full CI/CD GitOps loop (Jenkins -> Harbor -> GitLab -> ArgoCD) ──
+# The closed loop a real team runs: Jenkins builds an image, pushes it to Harbor,
+# bumps the image tag in a Helm chart stored in GitLab, and ArgoCD auto-syncs the
+# new tag into the cluster. MOST COMPLEX / EXPERIMENTAL — many integration points.
+#
+# Mechanism choices (most reliable on OpenShift):
+#  - image build: an OpenShift Docker-strategy BuildConfig that pushes to Harbor with
+#    a robot pushSecret (no in-cluster Docker daemon / kaniko plumbing needed).
+#  - Jenkins job: an OpenShift 'JenkinsPipeline' BuildConfig — the OpenShift-Sync
+#    plugin in the Jenkins image auto-creates the Jenkins pipeline job from it, so we
+#    avoid scripting the OAuth-protected Jenkins API. Drive it with `oc start-build`.
+#  - GitLab: seed a project + token via the API (OAuth ROPC with the root password).
+#  - ArgoCD: a repository credential secret + an Application watching the GitLab repo.
+APPSIM_CICD_APP_TAG=${APPSIM_CICD_APP_TAG:-v1}
+
+_gitlab_token() {  # echo an API token for root via OAuth resource-owner password grant
+  local gl=$1 pw=$2
+  curl -sk -X POST "$gl/oauth/token" \
+    -d "grant_type=password&username=root&password=$pw" 2>/dev/null \
+    | jq -r '.access_token // empty'
+}
+_glapi() { curl -sk -H "Authorization: Bearer $GL_TOKEN" -H 'Content-Type: application/json' "$@"; }
+
+install_appsim_cicd() {
+  log "AppSim/CI-CD: Jenkins -> Harbor -> GitLab -> ArgoCD GitOps loop — EXPERIMENTAL"
+  local ns=appsim-cicd ingd; ingd=$(_ingress_domain)
+  # ── prerequisites ──
+  _appsim_need_argocd || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-cicd  : FAILED — ArgoCD unavailable"; return 1; }
+  oc -n jenkins get deploy jenkins >/dev/null 2>&1 || install_jenkins || true
+  oc get ns harbor >/dev/null 2>&1 || install_harbor || true
+  # GitLab is heavy + async — if it isn't up yet, kick it off and ask to re-run
+  if ! oc -n gitlab-system get gitlab gitlab >/dev/null 2>&1; then
+    install_gitlab || true
+    DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-cicd  : GitLab is installing (async, slow). Re-run --devops-components appsim-cicd
+                 once 'oc -n gitlab-system get pods' is all Running."
+    return 0
+  fi
+  local glhost; glhost=$(oc -n gitlab-system get route -o jsonpath='{range .items[*]}{.spec.host}{"\n"}{end}' 2>/dev/null | grep '^gitlab\.' | head -1)
+  local glpw; glpw=$(oc -n gitlab-system get secret gitlab-gitlab-initial-root-password -o jsonpath='{.data.password}' 2>/dev/null | base64 -d)
+  [ -n "$glhost" ] && [ -n "$glpw" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-cicd  : FAILED — GitLab not ready (route/root password missing); re-run later"; return 1; }
+  local GL="https://$glhost"
+  GL_TOKEN=$(_gitlab_token "$GL" "$glpw")
+  [ -n "$GL_TOKEN" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-cicd  : FAILED — could not get a GitLab API token (enable OAuth password grant,
+                 or create a root PAT manually) — see GitLab admin settings"; return 1; }
+
+  _devops_ns "$ns"
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
+  local harbor_host="harbor.$ingd" image="harbor.$ingd/appsim/app"
+
+  # ── 1) GitLab project 'appsim/app-config' seeded with a Helm chart + values ──
+  _glapi -X POST "$GL/api/v4/projects" \
+    -d '{"name":"app-config","path":"app-config","visibility":"internal","initialize_with_readme":true}' >/dev/null 2>&1 || true
+  local proj; proj=$(_glapi "$GL/api/v4/projects?search=app-config" | jq -r '.[0].id // empty')
+  if [ -n "$proj" ]; then
+    # seed Chart.yaml + values.yaml + a Deployment template (image.tag is what CI bumps)
+    _glcommit() { _glapi -X POST "$GL/api/v4/projects/$proj/repository/files/$1" \
+      -d "$(jq -n --arg c "$2" '{branch:"main",content:$c,commit_message:"seed "+env.f}')" >/dev/null 2>&1; }
+    f=Chart.yaml      _glcommit "Chart%2Eyaml"             $'apiVersion: v2\nname: appsim-app\nversion: 0.1.0'
+    f=values.yaml     _glcommit "values%2Eyaml"            "image:\n  repository: $image\n  tag: $APPSIM_CICD_APP_TAG"
+    f=deploy.yaml     _glcommit "templates%2Fdeploy%2Eyaml" $'apiVersion: apps/v1\nkind: Deployment\nmetadata: { name: app }\nspec:\n  replicas: 1\n  selector: { matchLabels: { app: appsim-app } }\n  template:\n    metadata: { labels: { app: appsim-app } }\n    spec:\n      containers:\n      - name: app\n        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"\n        ports: [{ containerPort: 8080 }]'
+  fi
+  local repoURL="$GL/appsim/app-config.git"
+
+  # ── 2) Harbor project 'appsim' + robot account (push creds) ──
+  local hpw; hpw=$(oc -n harbor get secret harbor-core -o jsonpath='{.data.HARBOR_ADMIN_PASSWORD}' 2>/dev/null | base64 -d)
+  curl -sk -u "admin:$hpw" -X POST "https://$harbor_host/api/v2.0/projects" \
+    -H 'Content-Type: application/json' -d '{"project_name":"appsim","public":true}' >/dev/null 2>&1 || true
+  local robot; robot=$(curl -sk -u "admin:$hpw" -X POST "https://$harbor_host/api/v2.0/robots" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"appsim-ci","duration":-1,"level":"system","permissions":[{"kind":"project","namespace":"appsim","access":[{"resource":"repository","action":"push"},{"resource":"repository","action":"pull"}]}]}' 2>/dev/null)
+  local rname rsecret; rname=$(echo "$robot" | jq -r '.name // empty'); rsecret=$(echo "$robot" | jq -r '.secret // empty')
+  if [ -n "$rsecret" ]; then
+    oc -n "$ns" create secret docker-registry harbor-push \
+      --docker-server="$harbor_host" --docker-username="$rname" --docker-password="$rsecret" \
+      --dry-run=client -o yaml | oc apply -f - >/dev/null
+  fi
+
+  # ── 3) image BuildConfig (Docker strategy) -> Harbor, + a Jenkins pipeline BC ──
+  oc apply -f - >/dev/null <<BC
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata: { name: appsim-app, namespace: $ns }
+spec:
+  source:
+    type: Dockerfile
+    dockerfile: |
+      FROM ghcr.io/stefanprodan/podinfo:latest
+      LABEL appsim=cicd
+  strategy: { type: Docker }
+  output:
+    to: { kind: DockerImage, name: "$image:$APPSIM_CICD_APP_TAG" }
+    pushSecret: { name: harbor-push }
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata: { name: appsim-pipeline, namespace: $ns }
+spec:
+  strategy:
+    type: JenkinsPipeline
+    jenkinsPipelineStrategy:
+      jenkinsfile: |
+        pipeline {
+          agent any
+          environment { TAG = "v\${BUILD_NUMBER}" }
+          stages {
+            stage('build & push image') {
+              steps { sh 'oc start-build appsim-app --follow -n $ns' }
+            }
+            stage('bump GitOps tag') {
+              steps {
+                sh '''
+                  git clone $repoURL cfg && cd cfg
+                  sed -i "s/  tag: .*/  tag: \${TAG}/" values.yaml
+                  git -c user.email=ci@appsim -c user.name=ci commit -am "ci: image \${TAG}" || true
+                  git push origin main || true
+                '''
+              }
+            }
+          }
+        }
+BC
+
+  # ── 4) ArgoCD repo credential + Application watching the GitLab chart ──
+  oc apply -f - >/dev/null <<RC
+apiVersion: v1
+kind: Secret
+metadata:
+  name: appsim-cicd-repo
+  namespace: argocd
+  labels: { argocd.argoproj.io/secret-type: repository }
+stringData:
+  type: git
+  url: $repoURL
+  username: root
+  password: $GL_TOKEN
+RC
+  _argocd_app appsim-cicd "$ns" "$repoURL" . main
+
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-cicd  : loop wired (EXPERIMENTAL). GitLab repo $repoURL, Harbor project 'appsim',
+                 image BuildConfig 'appsim-app', Jenkins pipeline 'appsim-pipeline',
+                 ArgoCD app 'appsim-cicd'. Trigger a run: oc -n $ns start-build appsim-pipeline
+                 -> new image tag in Harbor -> commit in GitLab -> ArgoCD syncs ns $ns"
+  return 0
+}
