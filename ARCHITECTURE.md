@@ -8,6 +8,8 @@ platform. It's the map; the other docs are the detail:
 - [GETTING_STARTED.md](GETTING_STARTED.md) — first run
 - [APPSIM.md](APPSIM.md) — the real-world application simulations
 - [SCANNING.md](SCANNING.md) — image (Harbor/Trivy) + code (SonarQube) scanning
+- [MESH.md](MESH.md) — service mesh & tracing UIs (Istio, Kiali, Jaeger) + the mesh showcase
+- [CICD.md](CICD.md) — the appsim-cicd CI engines (Jenkins vs GitLab CI)
 - [AFFINITY.md](AFFINITY.md) — scheduling: affinity/anti-affinity + draining nodes
 
 Everything is driven by **`deploy-okd.sh`**, which sources one file per concern from
@@ -122,6 +124,11 @@ or plain manifests.
 | **Kafka KRaft** | modern ZooKeeper-less Kafka | plain manifests |
 | **Strimzi** | Kafka **operator** — `Kafka`/`KafkaUser`/`KafkaTopic`, mTLS | OLM operator |
 | **SonarQube** | **code (SAST) scanning** — bugs, smells, security hotspots | Helm (community edition) |
+| **Istio** | **service mesh** — Envoy sidecars (traffic metrics + traces) | Helm (OpenShift profile + istio-cni) |
+| **Kiali** | **service-mesh console** — live graph/traffic/health (needs Istio) | Helm |
+| **Jaeger** | **trace UI** — reuses the Tempo-operator Jaeger query UI | route to TempoStack |
+| **OpenSearch + Dashboards** | **log search/visualization** (Kibana) + Fluent Bit | Helm (2nd log stack vs Loki) |
+| **GitLab Runner** | CI engine for the GitLab-CI variant of `appsim-cicd` | Helm (k8s executor) |
 
 These don't just sit side-by-side — the application simulations wire them into a working
 pipeline (next section).

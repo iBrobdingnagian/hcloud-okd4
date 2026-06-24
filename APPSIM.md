@@ -25,8 +25,12 @@ isn't installed it calls the matching `install_*` (e.g. `install_argocd`,
 | 19 | `appsim-awx`      | AWX project + job template, launched (Ansible automation) | ansible-tower-samples | light |
 | 20 | `appsim-cicd`     | Full CI/CD GitOps loop (see below) | kaniko-built podinfo | heavy |
 | 21 | `appsim-all`      | `appsim-gitops` + `appsim-events` + `appsim-awx` (the light subset) | — | medium |
+| 27 | `appsim-mesh`     | Online Boutique **inside an Istio mesh**, observed by Kiali/Jaeger | Online Boutique | heavy |
 
-The original Kafka traffic demo is still there as `appsim` (menu 11).
+The original Kafka traffic demo is still there as `appsim` (menu 11). `appsim-mesh` and the
+mesh/tracing UIs (Istio, Kiali, Jaeger) are documented in **[MESH.md](MESH.md)**; the two
+CI engines for `appsim-cicd` (Jenkins vs GitLab CI, via `APPSIM_CICD_CI`) in
+**[CICD.md](CICD.md)**.
 
 ### Running them
 

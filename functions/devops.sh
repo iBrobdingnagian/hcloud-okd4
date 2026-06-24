@@ -1366,6 +1366,137 @@ APPSIM
   return 0
 }
 
+# ── OpenSearch + Dashboards (Kibana) + Fluent Bit (Helm) — log stack ──────
+# A second, heavier log stack alongside Loki (per request). OpenSearch's JVM needs
+# vm.max_map_count=524288 (privileged sysctl init); security plugin disabled for a
+# lab (no TLS/auth). Fluent Bit ships every pod's logs to OpenSearch.
+install_opensearch() {
+  log "Installing OpenSearch + Dashboards (Kibana) + Fluent Bit (Helm) — EXPERIMENTAL / heavy"
+  _need_helm || { DEVOPS_NOTE="$DEVOPS_NOTE
+  opensearch  : FAILED — helm not installed"; return 1; }
+  ensure_storage_backend || { DEVOPS_NOTE="$DEVOPS_NOTE
+  opensearch  : FAILED — no usable storageclass"; return 1; }
+  local sc ingd; sc=$(_default_sc); ingd=$(_ingress_domain); _devops_ns opensearch
+  # ES needs the vm.max_map_count sysctl (privileged init) + fixed uids
+  oc adm policy add-scc-to-group privileged system:serviceaccounts:opensearch >/dev/null 2>&1 || true
+  oc adm policy add-scc-to-group anyuid     system:serviceaccounts:opensearch >/dev/null 2>&1 || true
+  helm repo add opensearch https://opensearch-project.github.io/helm-charts >/dev/null 2>&1 || true
+  helm repo add fluent https://fluent.github.io/helm-charts >/dev/null 2>&1 || true
+  helm repo update opensearch fluent >/dev/null 2>&1 || true
+
+  # single node, security plugin disabled (lab: no TLS/auth)
+  helm upgrade --install opensearch opensearch/opensearch -n opensearch \
+    --set singleNode=true --set replicas=1 \
+    --set persistence.size=10Gi \
+    --set-json 'extraEnvs=[{"name":"discovery.type","value":"single-node"},{"name":"DISABLE_SECURITY_PLUGIN","value":"true"},{"name":"DISABLE_INSTALL_DEMO_CONFIG","value":"true"},{"name":"OPENSEARCH_JAVA_OPTS","value":"-Xms512m -Xmx512m"}]' \
+    --set "persistence.storageClass=$sc" \
+    --wait --timeout 10m >/dev/null 2>&1 \
+    || echo "    OpenSearch helm reported a timeout/error (slow JVM) — check: oc -n opensearch get pods"
+  # Dashboards (the Kibana UI), pointed at the cluster, security disabled
+  helm upgrade --install opensearch-dashboards opensearch/opensearch-dashboards -n opensearch \
+    --set-json 'opensearchHosts=["http://opensearch-cluster-master:9200"]' \
+    --set-json 'extraEnvs=[{"name":"DISABLE_SECURITY_DASHBOARDS_PLUGIN","value":"true"}]' \
+    --wait --timeout 6m >/dev/null 2>&1 \
+    || echo "    OpenSearch Dashboards helm reported an error — check: oc -n opensearch get pods"
+  # Fluent Bit: tail pod logs (hostPath) -> OpenSearch index logstash-*
+  oc adm policy add-scc-to-group privileged system:serviceaccounts:opensearch >/dev/null 2>&1 || true
+  helm upgrade --install fluent-bit fluent/fluent-bit -n opensearch \
+    --set-json 'config.outputs="[OUTPUT]\n    Name  opensearch\n    Match kube.*\n    Host  opensearch-cluster-master\n    Port  9200\n    Suppress_Type_Name On\n    Logstash_Format On\n    Retry_Limit False\n    tls   Off"' \
+    --wait --timeout 5m >/dev/null 2>&1 \
+    || echo "    Fluent Bit helm reported an error — check: oc -n opensearch get pods -l app.kubernetes.io/name=fluent-bit"
+  _make_route opensearch kibana opensearch-dashboards http "kibana.$ingd"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  opensearch  : https://kibana.$ingd  (OpenSearch Dashboards = Kibana; security disabled)
+                Fluent Bit ships all pod logs -> index logstash-* (duplicates Loki)"
+  return 0
+}
+
+# ── Istio (Helm, OpenShift profile) — service mesh for Kiali ──────────────
+# OpenShift needs istio-cni (sidecar init can't get NET_ADMIN under restricted SCC)
+# and global.platform=openshift. Heavy; injects an Envoy sidecar into labelled ns.
+install_istio() {
+  log "Installing Istio (Helm, OpenShift profile) — EXPERIMENTAL / heavy"
+  _need_helm || { DEVOPS_NOTE="$DEVOPS_NOTE
+  istio       : FAILED — helm not installed"; return 1; }
+  _devops_ns istio-system
+  helm repo add istio https://istio-release.storage.googleapis.com/charts >/dev/null 2>&1 || true
+  helm repo update istio >/dev/null 2>&1 || true
+  # CNI + sidecars need privileged on OpenShift
+  oc adm policy add-scc-to-group privileged system:serviceaccounts:istio-system >/dev/null 2>&1 || true
+  helm upgrade --install istio-base istio/base -n istio-system --set defaultRevision=default \
+    --wait --timeout 5m >/dev/null 2>&1 || echo "    istio-base helm error — check CRDs"
+  helm upgrade --install istiod istio/istiod -n istio-system \
+    --set global.platform=openshift \
+    --wait --timeout 6m >/dev/null 2>&1 \
+    || echo "    istiod helm reported an error — check: oc -n istio-system get pods"
+  # istio-cni in its own ns (required on OpenShift)
+  _devops_ns istio-cni
+  oc adm policy add-scc-to-group privileged system:serviceaccounts:istio-cni >/dev/null 2>&1 || true
+  helm upgrade --install istio-cni istio/cni -n istio-cni \
+    --set global.platform=openshift --set profile=openshift \
+    --wait --timeout 5m >/dev/null 2>&1 \
+    || echo "    istio-cni helm reported an error — check: oc -n istio-cni get pods"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  istio       : installed (istiod + istio-cni). Label a namespace istio-injection=enabled
+                to get Envoy sidecars; pair with Kiali to visualize the mesh"
+  return 0
+}
+
+# ── Kiali (Helm) — service-mesh console (needs Istio) ─────────────────────
+install_kiali() {
+  log "Installing Kiali (Helm kiali-server) — EXPERIMENTAL"
+  _need_helm || { DEVOPS_NOTE="$DEVOPS_NOTE
+  kiali       : FAILED — helm not installed"; return 1; }
+  oc -n istio-system get deploy istiod >/dev/null 2>&1 || install_istio || true
+  local ingd; ingd=$(_ingress_domain)
+  helm repo add kiali https://kiali.org/helm-charts >/dev/null 2>&1 || true
+  helm repo update kiali >/dev/null 2>&1 || true
+  # anonymous auth (lab); wire Prometheus (UWM), tracing (Tempo/Jaeger), Grafana
+  helm upgrade --install kiali-server kiali/kiali-server -n istio-system \
+    --set auth.strategy=anonymous \
+    --set external_services.prometheus.url=https://thanos-querier.openshift-monitoring.svc:9091 \
+    --set external_services.tracing.enabled=true \
+    --set external_services.tracing.use_grpc=false \
+    --set external_services.tracing.internal_url=http://tempo-tempo-query-frontend.observability.svc:16686 \
+    --set external_services.grafana.enabled=true \
+    --set external_services.grafana.internal_url=http://grafana.grafana.svc:3000 \
+    --wait --timeout 5m >/dev/null 2>&1 \
+    || echo "    Kiali helm reported an error — check: oc -n istio-system get pods -l app=kiali"
+  _make_route istio-system kiali kiali http "kiali.$ingd"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  kiali       : https://kiali.$ingd  (mesh console; needs Istio + a sidecar-injected app,
+                e.g. the 'appsim-mesh' scenario; tracing -> Tempo/Jaeger, metrics -> UWM)"
+  return 0
+}
+
+# ── GitLab Runner (Helm) — CI engine alternative to Jenkins ───────────────
+# Registers a Kubernetes-executor runner to the in-cluster GitLab so appsim-cicd
+# can run on GitLab CI (.gitlab-ci.yml) instead of the Jenkins pipeline.
+# _install_gitlab_runner <gitlab-url> <runner-token>
+install_gitlab_runner() {
+  local gl=$1 token=$2
+  log "Installing GitLab Runner (Helm, Kubernetes executor)"
+  _need_helm || { DEVOPS_NOTE="$DEVOPS_NOTE
+  gitlab-runner: FAILED — helm not installed"; return 1; }
+  [ -n "$gl" ] && [ -n "$token" ] || { DEVOPS_NOTE="$DEVOPS_NOTE
+  gitlab-runner: FAILED — gitlab URL/runner token not provided"; return 1; }
+  _devops_ns gitlab-runner
+  oc adm policy add-scc-to-group anyuid     system:serviceaccounts:gitlab-runner >/dev/null 2>&1 || true
+  oc adm policy add-scc-to-group privileged system:serviceaccounts:gitlab-runner >/dev/null 2>&1 || true
+  helm repo add gitlab https://charts.gitlab.io >/dev/null 2>&1 || true
+  helm repo update gitlab >/dev/null 2>&1 || true
+  helm upgrade --install gitlab-runner gitlab/gitlab-runner -n gitlab-runner \
+    --set gitlabUrl="$gl" \
+    --set runnerToken="$token" \
+    --set rbac.create=true \
+    --set-json 'runners.config="[[runners]]\n  [runners.kubernetes]\n    namespace = \"gitlab-runner\"\n    image = \"alpine:3.20\"\n    privileged = false"' \
+    --wait --timeout 5m >/dev/null 2>&1 \
+    || echo "    GitLab Runner helm reported an error — check: oc -n gitlab-runner get pods"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  gitlab-runner: registered to $gl (Kubernetes executor) — runs .gitlab-ci.yml pipelines"
+  return 0
+}
+
 # ── menu / dispatcher ─────────────────────────────────────────────────────
 install_devops() {
   export KUBECONFIG=$PWD/ignition/auth/kubeconfig
@@ -1403,7 +1534,12 @@ install_devops() {
     echo " 20) Sim:CI/CD    — Jenkins->Harbor->GitLab->ArgoCD GitOps loop [heavy]"
     echo " 21) Sim:All      — GitOps + Events + AWX (light scenario subset)"
     echo " 22) SonarQube    — source-code quality / SAST (Helm; complements Harbor image scans)"
-    echo " 23) All          — all DevOps tools (no app simulations)"
+    echo " 23) Jaeger       — Jaeger UI for traces (exposes the Tempo-operator query UI)"
+    echo " 24) OpenSearch   — OpenSearch + Dashboards (Kibana) + Fluent Bit logs [heavy]"
+    echo " 25) Istio        — service mesh (Helm, OpenShift profile) [heavy]"
+    echo " 26) Kiali        — service-mesh console (needs Istio)"
+    echo " 27) Sim:Mesh     — Online Boutique inside Istio, observed by Kiali/Jaeger [heavy]"
+    echo " 28) All          — all DevOps tools (no app simulations)"
     printf 'Selection [1 2 3]: '
     read -r DSEL; DSEL=${DSEL:-1 2 3}
     for n in $DSEL; do
@@ -1430,7 +1566,12 @@ install_devops() {
         20) selected="$selected appsim-cicd" ;;
         21) selected="$selected appsim-all" ;;
         22) selected="$selected sonarqube" ;;
-        23) selected="cert-manager argocd jenkins gitlab harbor artifactory awx sonarqube kafka kafka-kraft strimzi-kafka" ;;
+        23) selected="$selected jaeger" ;;
+        24) selected="$selected opensearch" ;;
+        25) selected="$selected istio" ;;
+        26) selected="$selected kiali" ;;
+        27) selected="$selected appsim-mesh" ;;
+        28) selected="cert-manager argocd jenkins gitlab harbor artifactory awx sonarqube kafka kafka-kraft strimzi-kafka" ;;
       esac
     done
     # observability components install via Helm (single-binary) or via Operators;
@@ -1469,6 +1610,10 @@ install_devops() {
       artifactory|jfrog) install_artifactory || true ;;
       awx)     install_awx     || true ;;
       sonarqube|sonar) install_sonarqube || true ;;
+      jaeger)          install_jaeger     || true ;;
+      opensearch|kibana) install_opensearch || true ;;
+      istio)           install_istio      || true ;;
+      kiali)           install_kiali      || true ;;
       kafka|zookeeper)   install_kafka || true ;;
       kafka-kraft|kraft) install_kafka_kraft || true ;;
       strimzi-kafka|strimzi) install_strimzi || true ;;
@@ -1479,6 +1624,7 @@ install_devops() {
       appsim-awx)      install_appsim_awx      || true ;;
       appsim-cicd)     install_appsim_cicd     || true ;;
       appsim-all)      install_appsim_gitops || true; install_appsim_events || true; install_appsim_awx || true ;;
+      appsim-mesh)     install_appsim_mesh || true ;;
       loki)            install_loki  helm     || true ;;
       loki-operator)   install_loki  operator || true ;;
       tempo)           install_tempo helm     || true ;;
@@ -1486,7 +1632,7 @@ install_devops() {
       otel|otel-operator) ;;  # deferred below so Tempo exists first (OTLP target)
       observability|obs)      install_loki helm || true; install_tempo helm || true; install_otel helm || true ;;
       observability-operator) install_loki operator || true; install_tempo operator || true; install_otel operator || true ;;
-      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, sonarqube, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-all)" ;;
+      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, sonarqube, jaeger, opensearch, istio, kiali, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-mesh, appsim-all)" ;;
     esac
   done
   # OpenTelemetry last: its OTLP exporter targets Tempo, so Tempo must be up
