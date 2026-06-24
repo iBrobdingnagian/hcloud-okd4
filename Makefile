@@ -92,7 +92,7 @@ generate_ignition:
 .PHONY: hcloud_image
 hcloud_image:
 	@if [ -z "$(HCLOUD_TOKEN)" ]; then echo "ERROR: HCLOUD_TOKEN is not set"; exit 1; fi
-	if [ "$(DEPLOYMENT_TYPE)" == "okd" ]; then (cd packer && packer build -var location=$(PACKER_LOCATION) -var server_type=$(PACKER_SERVER_TYPE) -var fcos_release=$(TF_VAR_fcos_release) -var fcos_url=$(shell openshift-install coreos print-stream-json | jq -r '.architectures.x86_64.artifacts.qemu.formats."qcow2.xz".disk.location') hcloud-fcos.json); fi
+	if [ "$(DEPLOYMENT_TYPE)" == "okd" ]; then (cd packer && packer build -var location=$(PACKER_LOCATION) -var server_type=$(PACKER_SERVER_TYPE) -var fcos_release=$(TF_VAR_fcos_release) -var fcos_url=$(shell openshift-install coreos print-stream-json | jq -r '.architectures.x86_64.artifacts.qemu.formats | (."qcow2.gz" // ."qcow2.xz").disk.location') hcloud-fcos.json); fi
 	if [ "$(DEPLOYMENT_TYPE)" == "ocp" ]; then (cd packer && packer build -var location=$(PACKER_LOCATION) -var server_type=$(PACKER_SERVER_TYPE) -var rhcos_url=$(shell openshift-install coreos print-stream-json | jq -r '.architectures.x86_64.artifacts.qemu.formats."qcow2.gz".disk.location') hcloud-rhcos.json); fi
 
 .PHONY: sign_csr

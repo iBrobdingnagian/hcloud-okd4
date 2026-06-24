@@ -11,7 +11,7 @@ else
   if [ -n "$FLAG_RELEASE" ]; then
     PREFIX=$FLAG_RELEASE
   elif [ "$ASSUME_YES" = 1 ]; then
-    PREFIX=4.16
+    PREFIX=4.18
   else
     log "Choose an OKD version:"
     LINES="4.14 4.16 4.18 4.20 4.22 5.0"
