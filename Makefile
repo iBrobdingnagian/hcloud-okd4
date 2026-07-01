@@ -109,12 +109,26 @@ wait_completion:
 	openshift-install --dir=ignition/ wait-for install-complete --log-level=debug
 
 .PHONY: infrastructure
+# NOTE: `apply` runs in two phases — create the servers first, then everything
+# else — so the node IPs that hcloud_firewall rules reference (source_ips) are
+# KNOWN when the firewall is planned. This avoids the hcloud provider bug
+# "Provider produced inconsistent final plan ... does not correlate" that hits the
+# etcd/east-west rules when a server is (re)created in the same apply. destroy/plan
+# stay single-phase.
 infrastructure:
 	@if [ -z "$(TF_VAR_dns_domain)" ]; then echo "ERROR: TF_VAR_dns_domain is not set"; exit 1; fi
 	@if [ -z "$(TF_VAR_dns_zone_id)" ]; then echo "ERROR: TF_VAR_dns_zone_id is not set"; exit 1; fi
 	@if [ -z "$(HCLOUD_TOKEN)" ]; then echo "ERROR: HCLOUD_TOKEN is not set"; exit 1; fi
 	@if [ -z "$(CLOUDFLARE_EMAIL)" ]; then echo "ERROR: CLOUDFLARE_EMAIL is not set"; exit 1; fi
-	(cd terraform && terraform init && terraform $(MODE) -var image=$(COREOS_IMAGE) -var bootstrap=$(BOOTSTRAP))
+	(cd terraform && terraform init && \
+	 case "$(MODE)" in \
+	   apply*) \
+	     echo "==> two-phase apply [1/2]: servers first (so firewall source_ips resolve)" && \
+	     terraform $(MODE) -target=module.bootstrap -target=module.master -target=module.worker -var image=$(COREOS_IMAGE) -var bootstrap=$(BOOTSTRAP) && \
+	     echo "==> two-phase apply [2/2]: full apply (firewall / LB / DNS)" && \
+	     terraform $(MODE) -var image=$(COREOS_IMAGE) -var bootstrap=$(BOOTSTRAP) ;; \
+	   *) terraform $(MODE) -var image=$(COREOS_IMAGE) -var bootstrap=$(BOOTSTRAP) ;; \
+	 esac)
 	if [ "$(MODE)" == "apply" ]; then (cd ansible && ansible-playbook site.yml); fi
 
 .PHONY: destroy
