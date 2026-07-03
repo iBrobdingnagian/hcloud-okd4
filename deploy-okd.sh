@@ -52,7 +52,7 @@ Usage: ./deploy-okd.sh [options]
                     kafka,kafka-kraft,strimzi-kafka,appsim,loki,loki-operator,tempo,
                     tempo-operator,otel,otel-operator,observability,observability-operator,
                     appsim-gitops,appsim-boutique,appsim-events,appsim-awx,
-                    appsim-cicd,appsim-mesh,appsim-all
+                    appsim-cicd,appsim-mesh,appsim-bookinfo,appsim-emojivoto,appsim-all
                     (the *-operator variants use OLM + in-cluster MinIO for S3;
                     the bare names are lightweight Helm single-binary installs;
                     appsim-* are real-world application simulations across the stack;

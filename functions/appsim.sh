@@ -778,6 +778,7 @@ install_appsim_mesh() {
   # sidecar injection + anyuid for the Boutique containers and the Envoy sidecars
   oc label ns "$ns" istio-injection=enabled --overwrite >/dev/null 2>&1 || true
   oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
+  _mesh_metrics "$ns"   # scrape the sidecars into UWM so Kiali graphs this namespace
   _argocd_app boutique-mesh "$ns" "$BOUTIQUE_REPO" helm-chart main
   local t=0
   until oc -n "$ns" get svc frontend >/dev/null 2>&1; do
@@ -788,5 +789,70 @@ install_appsim_mesh() {
   appsim-mesh : Online Boutique in Istio (ns $ns, istio-injection=enabled; pods should be 2/2).
                 Live service graph in Kiali (https://kiali.$ingd), traces in Jaeger
                 (https://jaeger.$ingd), store https://boutique-mesh.$ingd. Locust drives traffic."
+  return 0
+}
+
+# ── appsim-bookinfo: Istio's canonical Bookinfo sample in the mesh ─────────
+# productpage -> details, reviews (v1/v2/v3) -> ratings. The classic Kiali demo,
+# deployed straight from the istio GitHub repo. A small in-mesh traffic generator
+# hits productpage so the graph is always live (Bookinfo has no built-in load).
+BOOKINFO_MANIFEST=${BOOKINFO_MANIFEST:-https://raw.githubusercontent.com/istio/istio/release-1.30/samples/bookinfo/platform/kube/bookinfo.yaml}
+install_appsim_bookinfo() {
+  log "AppSim/Mesh: Istio Bookinfo in the mesh (Kiali/Jaeger) — EXPERIMENTAL"
+  oc -n istio-system get deploy istiod >/dev/null 2>&1 || install_istio || true
+  oc -n istio-system get deploy kiali  >/dev/null 2>&1 || install_kiali || true
+  local ns=bookinfo ingd; ingd=$(_ingress_domain)
+  _devops_ns "$ns"
+  # label BEFORE applying so every pod is sidecar-injected at creation
+  oc label ns "$ns" istio-injection=enabled --overwrite >/dev/null 2>&1 || true
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
+  _mesh_metrics "$ns"
+  oc -n "$ns" apply -f "$BOOKINFO_MANIFEST" >/dev/null 2>&1 \
+    || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-bookinfo: FAILED — could not apply $BOOKINFO_MANIFEST"; return 1; }
+  # in-mesh traffic generator (Bookinfo ships none): loop curl productpage
+  oc -n "$ns" apply -f - >/dev/null 2>&1 <<'TG'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: traffic-gen, labels: {app: traffic-gen}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: traffic-gen}}
+  template:
+    metadata: {labels: {app: traffic-gen}}
+    spec:
+      containers:
+      - name: curl
+        image: curlimages/curl:8.10.1
+        command: ["/bin/sh","-c","while true; do curl -s -o /dev/null http://productpage:9080/productpage; sleep 1; done"]
+TG
+  [ -n "$ingd" ] && _make_route "$ns" bookinfo productpage http "bookinfo.$ingd"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-bookinfo: Istio Bookinfo in mesh (ns $ns; pods 2/2). App https://bookinfo.$ingd/productpage;
+                live graph in Kiali (https://kiali.$ingd). traffic-gen drives productpage."
+  return 0
+}
+
+# ── appsim-emojivoto: Buoyant's emojivoto in the mesh ──────────────────────
+# web -> emoji, voting; plus a built-in vote-bot that generates its own traffic
+# (no external driver needed). From the emojivoto GitHub repo. Its manifest bundles
+# the namespace, so we apply first, then enable injection and restart to add sidecars.
+EMOJIVOTO_MANIFEST=${EMOJIVOTO_MANIFEST:-https://run.linkerd.io/emojivoto.yml}
+install_appsim_emojivoto() {
+  log "AppSim/Mesh: emojivoto in the mesh (Kiali/Jaeger) — EXPERIMENTAL"
+  oc -n istio-system get deploy istiod >/dev/null 2>&1 || install_istio || true
+  oc -n istio-system get deploy kiali  >/dev/null 2>&1 || install_kiali || true
+  local ns=emojivoto ingd; ingd=$(_ingress_domain)
+  oc apply -f "$EMOJIVOTO_MANIFEST" >/dev/null 2>&1 \
+    || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-emojivoto: FAILED — could not apply $EMOJIVOTO_MANIFEST"; return 1; }
+  oc label ns "$ns" istio-injection=enabled --overwrite >/dev/null 2>&1 || true
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
+  _mesh_metrics "$ns"
+  oc -n "$ns" rollout restart deploy >/dev/null 2>&1 || true   # recreate pods with sidecars
+  [ -n "$ingd" ] && _make_route "$ns" emojivoto web-svc http "emojivoto.$ingd"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-emojivoto: emojivoto in mesh (ns $ns; pods 2/2). App https://emojivoto.$ingd;
+                live graph in Kiali (https://kiali.$ingd). Built-in vote-bot drives traffic."
   return 0
 }

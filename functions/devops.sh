@@ -157,6 +157,65 @@ spec:
 RT
 }
 
+# _reencrypt_route <ns> <name> <service> <targetPort> <host> — for backends that
+# serve TLS themselves (e.g. Kiali on 20001). An edge route sends plaintext and the
+# backend answers 400; reencrypt makes the router speak HTTPS to the pod.
+_reencrypt_route() {
+  oc apply -f - >/dev/null <<RT
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: $2
+  namespace: $1
+spec:
+  host: $5
+  to: { kind: Service, name: $3 }
+  port: { targetPort: $4 }
+  tls: { termination: reencrypt, insecureEdgeTerminationPolicy: Redirect }
+RT
+}
+
+# Enable OpenShift User Workload Monitoring — Kiali/mesh metrics land in UWM's
+# Prometheus (scraped via ServiceMonitor/PodMonitor). Idempotent; preserves any
+# existing cluster-monitoring-config.
+_ensure_uwm() {
+  local cfg; cfg=$(oc -n openshift-monitoring get cm cluster-monitoring-config \
+    -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)
+  printf '%s' "$cfg" | grep -q 'enableUserWorkload:[[:space:]]*true' && return 0
+  if [ -z "$cfg" ]; then cfg="enableUserWorkload: true"; else cfg="enableUserWorkload: true
+$cfg"; fi
+  oc -n openshift-monitoring create cm cluster-monitoring-config \
+    --from-literal=config.yaml="$cfg" --dry-run=client -o yaml | oc apply -f - >/dev/null 2>&1 || true
+}
+
+# _mesh_metrics <ns> — scrape the Envoy sidecars in <ns> into UWM so Kiali sees
+# istio_requests_total. Quoted heredoc keeps the relabel regex literal; the ns is
+# applied via `oc -n`.
+_mesh_metrics() {
+  _ensure_uwm
+  oc -n "$1" apply -f - >/dev/null 2>&1 <<'PM'
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: istio-proxies-monitor
+spec:
+  selector:
+    matchExpressions:
+    - {key: istio-prometheus-ignore, operator: DoesNotExist}
+  podMetricsEndpoints:
+  - path: /stats/prometheus
+    interval: 30s
+    relabelings:
+    - {action: keep, sourceLabels: [__meta_kubernetes_pod_container_name], regex: "istio-proxy"}
+    - {action: keep, sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape], regex: "true"}
+    - action: replace
+      regex: (\d+);((([0-9]+?)(\.|$)){4})
+      replacement: '$2:$1'
+      sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+      targetLabel: __address__
+PM
+}
+
 # guard: Harbor & JFrog are Helm-installed (no usable operator in the catalog)
 _need_helm() {
   command -v helm >/dev/null 2>&1 && return 0
@@ -1432,10 +1491,33 @@ install_istio() {
   # istio-cni in its own ns (required on OpenShift)
   _devops_ns istio-cni
   oc adm policy add-scc-to-group privileged system:serviceaccounts:istio-cni >/dev/null 2>&1 || true
+  # NB: this chart has no "openshift" profile (that's an istioctl concept) — passing
+  # --set profile=openshift aborts with "unknown profile openshift" and the CNI never
+  # installs, leaving injected pods stuck in Init (no istio-cni NetworkAttachmentDef).
+  # The correct OpenShift setup is global.platform=openshift + the Multus paths +
+  # chained=false so istio-cni registers as a standalone NAD.
   helm upgrade --install istio-cni istio/cni -n istio-cni \
-    --set global.platform=openshift --set profile=openshift \
+    --set global.platform=openshift \
+    --set cni.cniConfDir=/etc/cni/multus/net.d \
+    --set cni.cniBinDir=/var/lib/cni/bin \
+    --set cni.chained=false \
     --wait --timeout 5m >/dev/null 2>&1 \
     || echo "    istio-cni helm reported an error — check: oc -n istio-cni get pods"
+  # scrape istiod control-plane metrics into UWM (Kiali reads them for the graph)
+  _ensure_uwm
+  oc apply -f - >/dev/null 2>&1 <<'SM'
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: istiod-monitor
+  namespace: istio-system
+spec:
+  targetLabels: [app]
+  selector:
+    matchLabels: {istio: pilot}
+  endpoints:
+  - {port: http-monitoring, interval: 30s}
+SM
   DEVOPS_NOTE="$DEVOPS_NOTE
   istio       : installed (istiod + istio-cni). Label a namespace istio-injection=enabled
                 to get Envoy sidecars; pair with Kiali to visualize the mesh"
@@ -1449,12 +1531,20 @@ install_kiali() {
   kiali       : FAILED — helm not installed"; return 1; }
   oc -n istio-system get deploy istiod >/dev/null 2>&1 || install_istio || true
   local ingd; ingd=$(_ingress_domain)
+  _ensure_uwm   # Kiali reads metrics from UWM's thanos-querier
   helm repo add kiali https://kiali.org/helm-charts >/dev/null 2>&1 || true
   helm repo update kiali >/dev/null 2>&1 || true
-  # anonymous auth (lab); wire Prometheus (UWM), tracing (Tempo/Jaeger), Grafana
+  # anonymous auth (lab); wire Prometheus (UWM), tracing (Tempo/Jaeger), Grafana.
+  # thanos-querier needs a bearer token (Kiali's SA) + it serves a service-CA cert
+  # Kiali doesn't trust — hence prometheus.auth: bearer/use_kiali_token/skip-verify.
+  # Without this Kiali logs "x509: certificate signed by unknown authority" and the
+  # graph stays empty ("metrics features temporarily unavailable").
   helm upgrade --install kiali-server kiali/kiali-server -n istio-system \
     --set auth.strategy=anonymous \
     --set external_services.prometheus.url=https://thanos-querier.openshift-monitoring.svc:9091 \
+    --set external_services.prometheus.auth.type=bearer \
+    --set external_services.prometheus.auth.use_kiali_token=true \
+    --set external_services.prometheus.auth.insecure_skip_verify=true \
     --set external_services.tracing.enabled=true \
     --set external_services.tracing.use_grpc=false \
     --set external_services.tracing.internal_url=http://tempo-tempo-query-frontend.observability.svc:16686 \
@@ -1462,10 +1552,16 @@ install_kiali() {
     --set external_services.grafana.internal_url=http://grafana.grafana.svc:3000 \
     --wait --timeout 5m >/dev/null 2>&1 \
     || echo "    Kiali helm reported an error — check: oc -n istio-system get pods -l app=kiali"
-  _make_route istio-system kiali kiali http "kiali.$ingd"
+  # let the Kiali SA query thanos-querier (platform + UWM metrics)
+  oc adm policy add-cluster-role-to-user cluster-monitoring-view -z kiali -n istio-system >/dev/null 2>&1 || true
+  oc -n istio-system rollout restart deploy/kiali >/dev/null 2>&1 || true
+  # Kiali serves HTTPS on 20001 (svc port name "tcp"); a reencrypt route (not edge) is
+  # required or the router gets a 400 and the UI shows "Application is not available".
+  _reencrypt_route istio-system kiali kiali 20001 "kiali.$ingd"
   DEVOPS_NOTE="$DEVOPS_NOTE
   kiali       : https://kiali.$ingd  (mesh console; needs Istio + a sidecar-injected app,
-                e.g. the 'appsim-mesh' scenario; tracing -> Tempo/Jaeger, metrics -> UWM)"
+                e.g. the 'appsim-mesh' scenario; tracing -> Tempo/Jaeger, metrics -> UWM.
+                Run a mesh scenario like appsim-mesh/appsim-bookinfo/appsim-emojivoto for a live graph)"
   return 0
 }
 
@@ -1539,7 +1635,9 @@ install_devops() {
     echo " 25) Istio        — service mesh (Helm, OpenShift profile) [heavy]"
     echo " 26) Kiali        — service-mesh console (needs Istio)"
     echo " 27) Sim:Mesh     — Online Boutique inside Istio, observed by Kiali/Jaeger [heavy]"
-    echo " 28) All          — all DevOps tools (no app simulations)"
+    echo " 28) Sim:Bookinfo — Istio Bookinfo in the mesh + traffic gen (classic Kiali demo)"
+    echo " 29) Sim:Emoji    — emojivoto in the mesh (built-in vote-bot traffic)"
+    echo " 30) All          — all DevOps tools (no app simulations)"
     printf 'Selection [1 2 3]: '
     read -r DSEL; DSEL=${DSEL:-1 2 3}
     for n in $DSEL; do
@@ -1571,7 +1669,9 @@ install_devops() {
         25) selected="$selected istio" ;;
         26) selected="$selected kiali" ;;
         27) selected="$selected appsim-mesh" ;;
-        28) selected="cert-manager argocd jenkins gitlab harbor artifactory awx sonarqube kafka kafka-kraft strimzi-kafka" ;;
+        28) selected="$selected appsim-bookinfo" ;;
+        29) selected="$selected appsim-emojivoto" ;;
+        30) selected="cert-manager argocd jenkins gitlab harbor artifactory awx sonarqube kafka kafka-kraft strimzi-kafka" ;;
       esac
     done
     # observability components install via Helm (single-binary) or via Operators;
@@ -1625,6 +1725,8 @@ install_devops() {
       appsim-cicd)     install_appsim_cicd     || true ;;
       appsim-all)      install_appsim_gitops || true; install_appsim_events || true; install_appsim_awx || true ;;
       appsim-mesh)     install_appsim_mesh || true ;;
+      appsim-bookinfo) install_appsim_bookinfo  || true ;;
+      appsim-emojivoto|appsim-emoji) install_appsim_emojivoto || true ;;
       loki)            install_loki  helm     || true ;;
       loki-operator)   install_loki  operator || true ;;
       tempo)           install_tempo helm     || true ;;
@@ -1632,7 +1734,7 @@ install_devops() {
       otel|otel-operator) ;;  # deferred below so Tempo exists first (OTLP target)
       observability|obs)      install_loki helm || true; install_tempo helm || true; install_otel helm || true ;;
       observability-operator) install_loki operator || true; install_tempo operator || true; install_otel operator || true ;;
-      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, sonarqube, jaeger, opensearch, istio, kiali, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-mesh, appsim-all)" ;;
+      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, sonarqube, jaeger, opensearch, istio, kiali, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-mesh, appsim-bookinfo, appsim-emojivoto, appsim-all)" ;;
     esac
   done
   # OpenTelemetry last: its OTLP exporter targets Tempo, so Tempo must be up
