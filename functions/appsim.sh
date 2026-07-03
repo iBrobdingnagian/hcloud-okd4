@@ -428,12 +428,15 @@ _gitlab_token() {  # echo an API token for root via OAuth resource-owner passwor
 _glapi() { curl -sk -H "Authorization: Bearer $GL_TOKEN" -H 'Content-Type: application/json' "$@"; }
 
 install_appsim_cicd() {
-  log "AppSim/CI-CD: Jenkins -> Harbor -> GitLab -> ArgoCD GitOps loop — EXPERIMENTAL"
+  # CI engine: jenkins (default, OpenShift JenkinsPipeline) or gitlab (GitLab CI).
+  # The CD half (ArgoCD GitOps) is identical either way.
+  local ci=${APPSIM_CICD_CI:-jenkins}
+  log "AppSim/CI-CD: $ci -> Harbor -> GitLab -> ArgoCD GitOps loop — EXPERIMENTAL"
   local ns=appsim-cicd ingd; ingd=$(_ingress_domain)
   # ── prerequisites ──
   _appsim_need_argocd || { DEVOPS_NOTE="$DEVOPS_NOTE
   appsim-cicd  : FAILED — ArgoCD unavailable"; return 1; }
-  oc -n jenkins get deploy jenkins >/dev/null 2>&1 || install_jenkins || true
+  [ "$ci" = gitlab ] || oc -n jenkins get deploy jenkins >/dev/null 2>&1 || install_jenkins || true
   oc get ns harbor >/dev/null 2>&1 || install_harbor || true
   # GitLab is heavy + async — if it isn't up yet, kick it off and ask to re-run
   if ! oc -n gitlab-system get gitlab gitlab >/dev/null 2>&1; then
@@ -545,10 +548,67 @@ YAML
       | oc apply -f - >/dev/null 2>&1 || true
   fi
 
-  # ── 3) image build via kaniko (no internal registry on platform 'none', so an
-  #       OpenShift Docker BuildConfig can't run — kaniko is daemonless and pushes
-  #       straight to Harbor with the robot secret). Ship a Dockerfile + a kaniko
-  #       Job template (configmap, __TAG__ placeholder) the pipeline renders+runs. ──
+  # ── 3) CI engine ──
+  if [ "$ci" = gitlab ]; then
+    # GitLab CI: a Kubernetes-executor runner + a .gitlab-ci.yml in the repo replace
+    # the Jenkins pipeline. Same stages (sonar -> kaniko build/push -> bump tag);
+    # ArgoCD CD is unchanged.
+    local rtok; rtok=$(_glapi -X POST "$GL/api/v4/user/runners" \
+      -d 'runner_type=instance_type&description=appsim-cicd&tag_list=appsim,kubernetes' 2>/dev/null | jq -r '.token // empty')
+    if [ -n "$rtok" ]; then
+      install_gitlab_runner "$GL" "$rtok" || true
+    else
+      echo "    could not create a GitLab runner token via the API (admin?) — register a runner manually"
+    fi
+    # project CI/CD variables the pipeline uses (Harbor robot, SonarQube, image, push token)
+    local hpush_user hpush_pass
+    hpush_user=$(oc -n "$ns" get secret harbor-push -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d 2>/dev/null | jq -r '.auths[].auth' | base64 -d 2>/dev/null | cut -d: -f1)
+    hpush_pass=$(oc -n "$ns" get secret harbor-push -o jsonpath='{.data.\.dockerconfigjson}' 2>/dev/null | base64 -d 2>/dev/null | jq -r '.auths[].auth' | base64 -d 2>/dev/null | cut -d: -f2-)
+    _glvar() { _glapi -X POST "$GL/api/v4/projects/$proj/variables" -d "key=$1&value=$2&masked=false&protected=false" >/dev/null 2>&1 \
+      || _glapi -X PUT "$GL/api/v4/projects/$proj/variables/$1" -d "value=$2" >/dev/null 2>&1; }
+    _glvar HARBOR_HOST "$harbor_host"
+    _glvar HARBOR_USER "$hpush_user"
+    _glvar HARBOR_PASS "$hpush_pass"
+    _glvar IMAGE "$image"
+    _glvar GL_PUSH_TOKEN "$GL_TOKEN"
+    [ -n "${SONAR_HOST_URL:-}" ] && { _glvar SONAR_HOST_URL "$SONAR_HOST_URL"; _glvar SONAR_TOKEN "${SONAR_TOKEN:-}"; }
+    # seed .gitlab-ci.yml (kaniko build + sonar + tag bump). $$ pipeline IID = tag.
+    _glcommit ".gitlab-ci%2Eyml" "$(cat <<'GLCI'
+stages: [scan, build, deploy]
+variables:
+  TAG: "v${CI_PIPELINE_IID}"
+sonarqube:
+  stage: scan
+  image: sonarsource/sonar-scanner-cli:latest
+  script:
+    - if [ -n "$SONAR_HOST_URL" ]; then sonar-scanner -Dsonar.projectKey=appsim -Dsonar.sources=. -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.token=$SONAR_TOKEN || true; else echo "SonarQube not configured, skipping"; fi
+  allow_failure: true
+build:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$HARBOR_HOST\":{\"auth\":\"$(printf '%s:%s' "$HARBOR_USER" "$HARBOR_PASS" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - echo -e "FROM ghcr.io/stefanprodan/podinfo:latest\nLABEL appsim=cicd" > Dockerfile
+    - /kaniko/executor --dockerfile=Dockerfile --context=. --destination=$IMAGE:$TAG --skip-tls-verify
+deploy:
+  stage: deploy
+  image: alpine/git:latest
+  variables: { GIT_SSL_NO_VERIFY: "true" }
+  script:
+    - git clone https://oauth2:${GL_PUSH_TOKEN}@${CI_SERVER_HOST}/root/app-config.git cfg
+    - cd cfg
+    - sed -i "s|  tag:.*|  tag: ${TAG}|" values.yaml
+    - git -c user.email=ci@appsim -c user.name=ci commit -am "ci: image ${TAG}" || true
+    - git push origin HEAD:main || true
+GLCI
+)"
+    echo "    GitLab CI configured: runner + .gitlab-ci.yml seeded (pipeline runs on push)"
+  else
+  # ── Jenkins engine: kaniko (no internal registry on platform 'none' -> daemonless
+  #    build) + a JenkinsPipeline BuildConfig. Ship a Dockerfile + kaniko Job template. ──
   oc -n "$ns" create configmap appsim-dockerfile \
     --from-literal=Dockerfile=$'FROM ghcr.io/stefanprodan/podinfo:latest\nLABEL appsim=cicd' \
     --dry-run=client -o yaml | oc apply -f - >/dev/null
@@ -675,6 +735,7 @@ spec:
           }
         }
 BC
+  fi
 
   # ── 4) ArgoCD repo credential + Application watching the GitLab chart ──
   oc apply -f - >/dev/null <<RC
@@ -692,13 +753,40 @@ stringData:
   insecure: "true"
 RC
   # the Jenkins SA (ns jenkins) drives `oc start-build` in this ns -> needs edit here
-  oc adm policy add-role-to-user edit system:serviceaccount:jenkins:jenkins -n "$ns" >/dev/null 2>&1 || true
+  [ "$ci" = gitlab ] || oc adm policy add-role-to-user edit system:serviceaccount:jenkins:jenkins -n "$ns" >/dev/null 2>&1 || true
   _argocd_app appsim-cicd "$ns" "$repoURL" . main
 
+  local trigger="oc -n jenkins start-build appsim-pipeline"
+  [ "$ci" = gitlab ] && trigger="push to GitLab $repoURL (GitLab CI runs .gitlab-ci.yml)"
   DEVOPS_NOTE="$DEVOPS_NOTE
-  appsim-cicd  : loop wired (EXPERIMENTAL). GitLab repo $repoURL, Harbor project 'appsim',
-                 image BuildConfig 'appsim-app', Jenkins pipeline 'appsim-pipeline',
-                 ArgoCD app 'appsim-cicd'. Trigger a run: oc -n jenkins start-build appsim-pipeline
+  appsim-cicd  : loop wired (EXPERIMENTAL, CI engine: $ci). GitLab repo $repoURL,
+                 Harbor project 'appsim', ArgoCD app 'appsim-cicd'.
+                 Trigger a run: $trigger
                  -> new image tag in Harbor -> commit in GitLab -> ArgoCD syncs ns $ns"
+  return 0
+}
+
+# ── appsim-mesh: Online Boutique inside an Istio mesh (for Kiali/Jaeger) ───
+install_appsim_mesh() {
+  log "AppSim/Mesh: Online Boutique in an Istio mesh, observed by Kiali/Jaeger — heavy/EXPERIMENTAL"
+  oc -n istio-system get deploy istiod >/dev/null 2>&1 || install_istio || true
+  oc -n istio-system get deploy kiali  >/dev/null 2>&1 || install_kiali || true
+  _appsim_need_argocd || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-mesh : FAILED — ArgoCD unavailable"; return 1; }
+  local ns=appsim-mesh ingd; ingd=$(_ingress_domain)
+  _devops_ns "$ns"
+  # sidecar injection + anyuid for the Boutique containers and the Envoy sidecars
+  oc label ns "$ns" istio-injection=enabled --overwrite >/dev/null 2>&1 || true
+  oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
+  _argocd_app boutique-mesh "$ns" "$BOUTIQUE_REPO" helm-chart main
+  local t=0
+  until oc -n "$ns" get svc frontend >/dev/null 2>&1; do
+    t=$((t+1)); [ $t -le 48 ] || { echo "    frontend Service not synced yet — check: oc -n argocd get app boutique-mesh"; break; }; sleep 5
+  done
+  [ -n "$ingd" ] && oc -n "$ns" get svc frontend >/dev/null 2>&1 && _make_route "$ns" boutique-mesh frontend http "boutique-mesh.$ingd"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-mesh : Online Boutique in Istio (ns $ns, istio-injection=enabled; pods should be 2/2).
+                Live service graph in Kiali (https://kiali.$ingd), traces in Jaeger
+                (https://jaeger.$ingd), store https://boutique-mesh.$ingd. Locust drives traffic."
   return 0
 }

@@ -601,3 +601,29 @@ _yaml2json() {
     yq -o=json eval - 2>/dev/null
   fi
 }
+
+# ── Jaeger UI — expose the Tempo operator's built-in Jaeger query UI ────────
+# No separate trace store: the operator TempoStack already runs a Jaeger-compatible
+# query UI (template.queryFrontend.jaegerQuery). This ensures operator Tempo exists
+# and routes its Jaeger UI. (Helm single-binary Tempo has no Jaeger UI — use Grafana's
+# Tempo datasource there. Point mesh/app tracing at tempo-tempo-distributor:4317.)
+install_jaeger() {
+  log "Exposing Jaeger UI via the Tempo operator (TempoStack) — EXPERIMENTAL"
+  _obs_ns
+  if ! oc -n "$OBS_NS" get tempostack tempo >/dev/null 2>&1; then
+    echo "    operator Tempo not present — installing it (the Jaeger UI lives on its query-frontend)"
+    install_tempo operator || { DEVOPS_NOTE="$DEVOPS_NOTE
+  jaeger      : FAILED — operator Tempo (TempoStack) unavailable"; return 1; }
+  fi
+  local ingd; ingd=$(_ingress_domain)
+  # the query-frontend service exposes the Jaeger UI on 16686 (named port 'jaeger-ui')
+  local pname
+  pname=$(oc -n "$OBS_NS" get svc tempo-tempo-query-frontend -o json 2>/dev/null \
+    | jq -r '.spec.ports[]? | select(.port==16686) | .name' | head -1)
+  [ -n "$pname" ] || pname=jaeger-ui
+  _make_route "$OBS_NS" jaeger tempo-tempo-query-frontend "$pname" "jaeger.$ingd"
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  jaeger      : https://jaeger.$ingd  (Tempo's Jaeger UI; send OTLP traces to
+                tempo-tempo-distributor.$OBS_NS.svc:4317 — Kiali links to it)"
+  return 0
+}

@@ -23,6 +23,8 @@ This setup is suitable for small test environments only. Not recommended for pro
 - [GETTING_STARTED.md](GETTING_STARTED.md) — first run.
 - [APPSIM.md](APPSIM.md) — the real-world application simulations (GitOps, CI/CD, Kafka, AWX).
 - [SCANNING.md](SCANNING.md) — image (Harbor/Trivy) + code (SonarQube) scanning.
+- [MESH.md](MESH.md) — service mesh & tracing UIs (Istio, Kiali, Jaeger) + the mesh showcase.
+- [CICD.md](CICD.md) — the appsim-cicd CI engines (Jenkins vs GitLab CI).
 - [AFFINITY.md](AFFINITY.md) — scheduling: affinity/anti-affinity and draining nodes.
 
 ---

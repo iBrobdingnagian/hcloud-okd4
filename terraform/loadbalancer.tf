@@ -23,12 +23,25 @@ resource "hcloud_load_balancer_service" "lb_api" {
   listen_port      = 6443
   destination_port = 6443
 
+  # HTTP(S) health check against the kube-apiserver readiness endpoint instead of a
+  # bare TCP connect. During bootstrap the masters' apiservers open :6443 long before
+  # they can serve requests (etcd/cert rollout restarts them repeatedly); a TCP-only
+  # check marks those backends healthy, so the LB round-robins clients onto a socket
+  # that accepts then immediately closes the connection -> "EOF" on the client. Probing
+  # /readyz (200 only when the apiserver is actually ready) keeps not-ready masters out
+  # of rotation until they can serve. `tls = true` speaks HTTPS; hcloud does not verify
+  # the apiserver's self-signed cert, so no CA wiring is needed.
   health_check {
-    protocol = "tcp"
+    protocol = "http"
     port     = 6443
     interval = 10
     timeout  = 5
     retries  = 3
+    http {
+      path         = "/readyz"
+      tls          = true
+      status_codes = ["200"]
+    }
   }
 }
 
