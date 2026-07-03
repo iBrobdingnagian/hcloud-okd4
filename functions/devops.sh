@@ -216,25 +216,6 @@ spec:
 PM
 }
 
-# _mesh_tracing — enable distributed tracing mesh-wide. Every sidecar samples
-# requests and ships OTLP spans to the 'tempo-otlp' extensionProvider (configured
-# on istiod -> Tempo's distributor), which the Jaeger UI (install_jaeger) displays.
-# Harmless if Tempo isn't installed yet — spans are just dropped until it is.
-_mesh_tracing() {
-  oc apply -f - >/dev/null 2>&1 <<'TR'
-apiVersion: telemetry.istio.io/v1
-kind: Telemetry
-metadata:
-  name: mesh-default
-  namespace: istio-system
-spec:
-  tracing:
-  - providers:
-    - name: tempo-otlp
-    randomSamplingPercentage: 100
-TR
-}
-
 # guard: Harbor & JFrog are Helm-installed (no usable operator in the catalog)
 _need_helm() {
   command -v helm >/dev/null 2>&1 && return 0
@@ -1503,17 +1484,18 @@ install_istio() {
   oc adm policy add-scc-to-group privileged system:serviceaccounts:istio-system >/dev/null 2>&1 || true
   helm upgrade --install istio-base istio/base -n istio-system --set defaultRevision=default \
     --wait --timeout 5m >/dev/null 2>&1 || echo "    istio-base helm error — check CRDs"
-  # tracing: register an OpenTelemetry provider ('tempo-otlp') that ships spans to
-  # Tempo's OTLP distributor (what install_jaeger deploys); a Telemetry resource
-  # (below) turns sampling on mesh-wide so app traces land in the Jaeger UI.
-  local otlp_svc=${MESH_TRACING_OTLP_SERVICE:-tempo-tempo-distributor.observability.svc}
+  # tracing: send Envoy spans to Tempo's Zipkin receiver (:9411, what install_jaeger
+  # deploys). The legacy defaultConfig.tracing writes the tracer straight into each
+  # sidecar's bootstrap and reliably fires — unlike the Telemetry API's OpenTelemetry
+  # provider, which istiod 1.30 was observed NOT to attach to the sidecar listeners
+  # (no spans). Override the target with MESH_TRACING_ZIPKIN. sampling=100 for the lab.
+  local zipkin_addr=${MESH_TRACING_ZIPKIN:-tempo-tempo-distributor.observability.svc:9411}
   helm upgrade --install istiod istio/istiod -n istio-system \
     --set global.platform=openshift \
     --set meshConfig.enableTracing=true \
     --set meshConfig.defaultConfig.holdApplicationUntilProxyStarts=true \
-    --set "meshConfig.extensionProviders[0].name=tempo-otlp" \
-    --set "meshConfig.extensionProviders[0].opentelemetry.service=$otlp_svc" \
-    --set "meshConfig.extensionProviders[0].opentelemetry.port=4317" \
+    --set "meshConfig.defaultConfig.tracing.zipkin.address=$zipkin_addr" \
+    --set meshConfig.defaultConfig.tracing.sampling=100 \
     --wait --timeout 6m >/dev/null 2>&1 \
     || echo "    istiod helm reported an error — check: oc -n istio-system get pods"
   # holdApplicationUntilProxyStarts: make app containers wait for the Envoy sidecar
@@ -1549,11 +1531,10 @@ spec:
   endpoints:
   - {port: http-monitoring, interval: 30s}
 SM
-  _mesh_tracing   # mesh-wide Telemetry: sample requests -> Tempo/Jaeger
   DEVOPS_NOTE="$DEVOPS_NOTE
-  istio       : installed (istiod + istio-cni + tracing). Label a namespace
-                istio-injection=enabled for Envoy sidecars; pair with Kiali to
-                visualize the mesh and install 'jaeger' to see distributed traces"
+  istio       : installed (istiod + istio-cni + zipkin tracing -> Tempo). Label a
+                namespace istio-injection=enabled for Envoy sidecars; pair with Kiali
+                to visualize the mesh and install 'jaeger' to see distributed traces"
   return 0
 }
 
