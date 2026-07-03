@@ -166,7 +166,7 @@ providers:
 - { name: workloads,     orgId: 1, folder: 'Workloads',     type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/workloads } }
 - { name: network,       orgId: 1, folder: 'Network',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/network } }
 - { name: storage,       orgId: 1, folder: 'Storage',       type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/storage } }
-- { name: onzack,        orgId: 1, folder: 'ONZACK',        type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/onzack } }
+- { name: onzack,        orgId: 1, folder: 'Onzack',        type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/onzack } }
 - { name: observability, orgId: 1, folder: 'Observability', type: file, disableDeletion: false, updateIntervalSeconds: 30, options: { path: /var/lib/grafana/dashboards/observability } }
 DBPEOF
     oc -n grafana create configmap grafana-dashboard-provider \

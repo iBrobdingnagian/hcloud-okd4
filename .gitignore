@@ -21,3 +21,5 @@ users.htpasswd
 autodestroy.log
 .autodestroy-atjob
 logs/
+# session/run logs — may contain the kubeadmin password and other secrets
+*.log
