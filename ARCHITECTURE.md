@@ -124,8 +124,8 @@ or plain manifests.
 | **Kafka KRaft** | modern ZooKeeper-less Kafka | plain manifests |
 | **Strimzi** | Kafka **operator** — `Kafka`/`KafkaUser`/`KafkaTopic`, mTLS | OLM operator |
 | **SonarQube** | **code (SAST) scanning** — bugs, smells, security hotspots | Helm (community edition) |
-| **Istio** | **service mesh** — Envoy sidecars (traffic metrics + traces) | Helm (OpenShift profile + istio-cni) |
-| **Kiali** | **service-mesh console** — live graph/traffic/health (needs Istio) | Helm |
+| **Istio** | **service mesh** — Envoy sidecars (traffic metrics + traces) | Helm (`global.platform=openshift` + istio-cni) |
+| **Kiali** | **service-mesh console** — live graph/traffic/health (needs Istio + UWM metrics) | Helm (UWM + reencrypt route) |
 | **Jaeger** | **trace UI** — reuses the Tempo-operator Jaeger query UI | route to TempoStack |
 | **OpenSearch + Dashboards** | **log search/visualization** (Kibana) + Fluent Bit | Helm (2nd log stack vs Loki) |
 | **GitLab Runner** | CI engine for the GitLab-CI variant of `appsim-cicd` | Helm (k8s executor) |
