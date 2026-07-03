@@ -792,25 +792,52 @@ install_appsim_mesh() {
   return 0
 }
 
-# ── appsim-bookinfo: Istio's canonical Bookinfo sample in the mesh ─────────
-# productpage -> details, reviews (v1/v2/v3) -> ratings. The classic Kiali demo,
-# deployed straight from the istio GitHub repo. A small in-mesh traffic generator
-# hits productpage so the graph is always live (Bookinfo has no built-in load).
-BOOKINFO_MANIFEST=${BOOKINFO_MANIFEST:-https://raw.githubusercontent.com/istio/istio/release-1.30/samples/bookinfo/platform/kube/bookinfo.yaml}
+# ── appsim-bookinfo: Istio's canonical Bookinfo sample in the mesh (via ArgoCD) ─
+# productpage -> details, reviews (v1/v2/v3) -> ratings. Deployed GitOps-style by
+# ArgoCD from the istio repo (only bookinfo.yaml — the dir holds many variants). A
+# small in-mesh traffic generator hits productpage so the graph is always live.
+BOOKINFO_REPO=${BOOKINFO_REPO:-https://github.com/istio/istio}
+BOOKINFO_PATH=${BOOKINFO_PATH:-samples/bookinfo/platform/kube}
+BOOKINFO_REV=${BOOKINFO_REV:-release-1.30}
 install_appsim_bookinfo() {
-  log "AppSim/Mesh: Istio Bookinfo in the mesh (Kiali/Jaeger) — EXPERIMENTAL"
+  log "AppSim/Mesh: Istio Bookinfo in the mesh via ArgoCD — EXPERIMENTAL"
   oc -n istio-system get deploy istiod >/dev/null 2>&1 || install_istio || true
   oc -n istio-system get deploy kiali  >/dev/null 2>&1 || install_kiali || true
+  _appsim_need_argocd || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-bookinfo: FAILED — ArgoCD unavailable"; return 1; }
   local ns=bookinfo ingd; ingd=$(_ingress_domain)
   _devops_ns "$ns"
-  # label BEFORE applying so every pod is sidecar-injected at creation
+  # label BEFORE ArgoCD syncs so pods are sidecar-injected at creation
   oc label ns "$ns" istio-injection=enabled --overwrite >/dev/null 2>&1 || true
+  oc label ns "$ns" argocd.argoproj.io/managed-by=argocd --overwrite >/dev/null 2>&1 || true
   oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
   _mesh_metrics "$ns"
-  oc -n "$ns" apply -f "$BOOKINFO_MANIFEST" >/dev/null 2>&1 \
-    || { DEVOPS_NOTE="$DEVOPS_NOTE
-  appsim-bookinfo: FAILED — could not apply $BOOKINFO_MANIFEST"; return 1; }
-  # in-mesh traffic generator (Bookinfo ships none): loop curl productpage
+  oc apply -f - >/dev/null 2>&1 <<APP
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bookinfo
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: $BOOKINFO_REPO
+    path: $BOOKINFO_PATH
+    targetRevision: $BOOKINFO_REV
+    directory:
+      include: bookinfo.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: $ns
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
+APP
+  local t=0
+  until oc -n "$ns" get svc productpage >/dev/null 2>&1; do
+    t=$((t+1)); [ $t -le 48 ] || { echo "    productpage not synced yet — check: oc -n argocd get app bookinfo"; break; }; sleep 5
+  done
+  # in-mesh traffic generator (Bookinfo ships none) — not ArgoCD-managed, so not pruned
   oc -n "$ns" apply -f - >/dev/null 2>&1 <<'TG'
 apiVersion: apps/v1
 kind: Deployment
@@ -826,33 +853,73 @@ spec:
         image: curlimages/curl:8.10.1
         command: ["/bin/sh","-c","while true; do curl -s -o /dev/null http://productpage:9080/productpage; sleep 1; done"]
 TG
-  [ -n "$ingd" ] && _make_route "$ns" bookinfo productpage http "bookinfo.$ingd"
+  [ -n "$ingd" ] && oc -n "$ns" get svc productpage >/dev/null 2>&1 && _make_route "$ns" bookinfo productpage http "bookinfo.$ingd"
   DEVOPS_NOTE="$DEVOPS_NOTE
-  appsim-bookinfo: Istio Bookinfo in mesh (ns $ns; pods 2/2). App https://bookinfo.$ingd/productpage;
-                live graph in Kiali (https://kiali.$ingd). traffic-gen drives productpage."
+  appsim-bookinfo: Istio Bookinfo in mesh via ArgoCD (app 'bookinfo', ns $ns; pods 2/2).
+                App https://bookinfo.$ingd/productpage; graph in Kiali (https://kiali.$ingd),
+                traces in Jaeger. traffic-gen drives productpage."
   return 0
 }
 
-# ── appsim-emojivoto: Buoyant's emojivoto in the mesh ──────────────────────
-# web -> emoji, voting; plus a built-in vote-bot that generates its own traffic
-# (no external driver needed). From the emojivoto GitHub repo. Its manifest bundles
-# the namespace, so we apply first, then enable injection and restart to add sidecars.
-EMOJIVOTO_MANIFEST=${EMOJIVOTO_MANIFEST:-https://run.linkerd.io/emojivoto.yml}
+# ── appsim-emojivoto: Buoyant's emojivoto in the mesh (via ArgoCD/kustomize) ───
+# web -> emoji, voting; plus a built-in vote-bot that generates its own traffic.
+# ArgoCD renders the kustomize base (which bundles the namespace); we pre-label the
+# ns for injection and restart after sync so every pod gets a sidecar.
+EMOJIVOTO_REPO=${EMOJIVOTO_REPO:-https://github.com/BuoyantIO/emojivoto}
+EMOJIVOTO_PATH=${EMOJIVOTO_PATH:-kustomize/deployment}
+EMOJIVOTO_REV=${EMOJIVOTO_REV:-main}
 install_appsim_emojivoto() {
-  log "AppSim/Mesh: emojivoto in the mesh (Kiali/Jaeger) — EXPERIMENTAL"
+  log "AppSim/Mesh: emojivoto in the mesh via ArgoCD — EXPERIMENTAL"
   oc -n istio-system get deploy istiod >/dev/null 2>&1 || install_istio || true
   oc -n istio-system get deploy kiali  >/dev/null 2>&1 || install_kiali || true
+  _appsim_need_argocd || { DEVOPS_NOTE="$DEVOPS_NOTE
+  appsim-emojivoto: FAILED — ArgoCD unavailable"; return 1; }
   local ns=emojivoto ingd; ingd=$(_ingress_domain)
-  oc apply -f "$EMOJIVOTO_MANIFEST" >/dev/null 2>&1 \
-    || { DEVOPS_NOTE="$DEVOPS_NOTE
-  appsim-emojivoto: FAILED — could not apply $EMOJIVOTO_MANIFEST"; return 1; }
+  _devops_ns "$ns"
   oc label ns "$ns" istio-injection=enabled --overwrite >/dev/null 2>&1 || true
+  oc label ns "$ns" argocd.argoproj.io/managed-by=argocd --overwrite >/dev/null 2>&1 || true
   oc adm policy add-scc-to-group anyuid system:serviceaccounts:"$ns" >/dev/null 2>&1 || true
   _mesh_metrics "$ns"
-  oc -n "$ns" rollout restart deploy >/dev/null 2>&1 || true   # recreate pods with sidecars
-  [ -n "$ingd" ] && _make_route "$ns" emojivoto web-svc http "emojivoto.$ingd"
+  # kustomize base bundles a Namespace; this ArgoCD runs namespaced (can't manage
+  # cluster-scoped resources), so strip it with a delete-patch — we pre-create the ns.
+  oc apply -f - >/dev/null 2>&1 <<APP
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: emojivoto
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: $EMOJIVOTO_REPO
+    path: $EMOJIVOTO_PATH
+    targetRevision: $EMOJIVOTO_REV
+    kustomize:
+      patches:
+      - target: { kind: Namespace, name: emojivoto }
+        patch: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: emojivoto
+          \$patch: delete
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: $ns
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [CreateNamespace=true]
+APP
+  local t=0
+  until oc -n "$ns" get svc web-svc >/dev/null 2>&1; do
+    t=$((t+1)); [ $t -le 48 ] || { echo "    web-svc not synced yet — check: oc -n argocd get app emojivoto"; break; }; sleep 5
+  done
+  # no rollout restart: the ns is pre-labeled, so ArgoCD-created pods are injected at
+  # creation. Restarting here just fights ArgoCD selfHeal (annotation drift -> churn).
+  [ -n "$ingd" ] && oc -n "$ns" get svc web-svc >/dev/null 2>&1 && _make_route "$ns" emojivoto web-svc http "emojivoto.$ingd"
   DEVOPS_NOTE="$DEVOPS_NOTE
-  appsim-emojivoto: emojivoto in mesh (ns $ns; pods 2/2). App https://emojivoto.$ingd;
-                live graph in Kiali (https://kiali.$ingd). Built-in vote-bot drives traffic."
+  appsim-emojivoto: emojivoto in mesh via ArgoCD (app 'emojivoto', ns $ns; pods 2/2).
+                App https://emojivoto.$ingd; graph in Kiali (https://kiali.$ingd),
+                traces in Jaeger. Built-in vote-bot drives traffic."
   return 0
 }
