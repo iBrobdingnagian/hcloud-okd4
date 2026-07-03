@@ -18,7 +18,14 @@ resource "hcloud_server" "server" {
   backups      = var.backups
   firewall_ids = var.firewall_ids
   lifecycle {
-    ignore_changes = [user_data, image, firewall_ids]
+    # `location` is create-only (forces replacement). The hcloud API can report a
+    # null datacenter/location for an already-running server, which the provider
+    # stores as "" and never repopulates on refresh; comparing that to the
+    # configured location then looks like a change and would destroy+recreate a
+    # live node on the next apply. These are immutable cattle (we already ignore
+    # image drift for the same reason) — ignore location so the node is not
+    # replaced out from under a running cluster.
+    ignore_changes = [user_data, image, firewall_ids, location]
   }
 }
 
