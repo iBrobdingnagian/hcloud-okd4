@@ -1510,9 +1510,9 @@ install_istio() {
   helm upgrade --install istiod istio/istiod -n istio-system \
     --set global.platform=openshift \
     --set meshConfig.enableTracing=true \
-    --set meshConfig.extensionProviders[0].name=tempo-otlp \
-    --set meshConfig.extensionProviders[0].opentelemetry.service="$otlp_svc" \
-    --set meshConfig.extensionProviders[0].opentelemetry.port=4317 \
+    --set "meshConfig.extensionProviders[0].name=tempo-otlp" \
+    --set "meshConfig.extensionProviders[0].opentelemetry.service=$otlp_svc" \
+    --set "meshConfig.extensionProviders[0].opentelemetry.port=4317" \
     --wait --timeout 6m >/dev/null 2>&1 \
     || echo "    istiod helm reported an error — check: oc -n istio-system get pods"
   # istio-cni in its own ns (required on OpenShift)
