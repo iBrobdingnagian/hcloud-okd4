@@ -32,9 +32,11 @@ covers scanning; [ARCHITECTURE.md](ARCHITECTURE.md) is the big picture).
     CNI install aborts, leaving injected pods stuck in `Init` (no NAD).
   - `meshConfig.defaultConfig.holdApplicationUntilProxyStarts=true` so app containers wait
     for the Envoy sidecar (fewer startup-race crash-loops).
-  - A **tracing** OpenTelemetry provider (`tempo-otlp`) + a mesh-wide `Telemetry` point
-    sidecar spans at `tempo-tempo-distributor.observability.svc:4317`
-    (`MESH_TRACING_OTLP_SERVICE` overrides). See **Known issues** below.
+  - **Tracing** to Tempo's Zipkin receiver via `meshConfig.defaultConfig.tracing.zipkin`
+    (`tempo-tempo-distributor.observability.svc:9411`, `MESH_TRACING_ZIPKIN` overrides,
+    `sampling=100`). The legacy bootstrap tracer is used deliberately — the Telemetry-API
+    OpenTelemetry provider did **not** attach to sidecars on istiod 1.30 (no spans). Once
+    `jaeger` is installed, mesh app traces show up in the Jaeger UI.
   - An `istiod` ServiceMonitor scrapes control-plane metrics into UWM.
 - **Kiali** (`install_kiali`) — Helm `kiali-server` in `istio-system`, `anonymous` auth.
   For the **graph to actually populate** the installer now also:
@@ -55,11 +57,13 @@ covers scanning; [ARCHITECTURE.md](ARCHITECTURE.md) is the big picture).
 Each creates its namespace, labels it `istio-injection=enabled`, grants `anyuid`, adds the
 sidecar **PodMonitor**, and drives traffic so Kiali/Jaeger have live data.
 
-| Menu | Token | App | Source | Traffic |
+All three are **deployed by ArgoCD** (GitOps) and appear in the ArgoCD UI.
+
+| Menu | Token | App | ArgoCD source | Traffic |
 |---|---|---|---|---|
-| 27 | `appsim-mesh` | Google **Online Boutique** (11 svcs) via ArgoCD | GoogleCloudPlatform/microservices-demo | built-in Locust |
-| 28 | `appsim-bookinfo` | Istio **Bookinfo** (productpage → details/reviews/ratings) | istio/istio (GitHub) | in-mesh `traffic-gen` curl loop |
-| 29 | `appsim-emojivoto` | Buoyant **emojivoto** (web → emoji/voting) | BuoyantIO/emojivoto (`run.linkerd.io/emojivoto.yml`) | built-in `vote-bot` |
+| 27 | `appsim-mesh` | Google **Online Boutique** (11 svcs) | GoogleCloudPlatform/microservices-demo (Helm) | built-in Locust |
+| 28 | `appsim-bookinfo` | Istio **Bookinfo** (productpage → details/reviews/ratings) | istio/istio `samples/bookinfo/platform/kube` (`bookinfo.yaml`) | in-mesh `traffic-gen` curl loop |
+| 29 | `appsim-emojivoto` | Buoyant **emojivoto** (web → emoji/voting) | BuoyantIO/emojivoto `kustomize/deployment` | built-in `vote-bot` |
 
 ```bash
 ./deploy-okd.sh --devops-components appsim-mesh,appsim-bookinfo,appsim-emojivoto
@@ -74,7 +78,7 @@ The same apps are then observable:
 | See | Where |
 |-----|-------|
 | live **service graph**, traffic rates, health | **Kiali** — `https://kiali.<apps>` → Graph → pick the namespace |
-| **distributed traces** | **Jaeger** — `https://jaeger.<apps>` (see Known issues) |
+| **distributed traces** | **Jaeger** — `https://jaeger.<apps>` (once `jaeger` is installed) |
 | **logs** | OpenSearch/Kibana and Loki (Grafana → Explore) |
 | **metrics** (incl. Envoy/istio) | Prometheus/UWM → Grafana |
 
@@ -93,13 +97,17 @@ Then generate traffic (Kiali graphs *active* traffic only) and open Kiali → Gr
 - **istio-cni NAD:** if injected pods hang in `Init` with
   `cannot find a network-attachment-definition (istio-cni)`, the CNI didn't install —
   check `oc -n istio-cni get pods` and that `profile=openshift` was **not** used.
-- **Distributed traces may not appear in Jaeger on Istio 1.30.** All the plumbing is in
-  place (Tempo up, provider + `Telemetry`, sidecars carry the tracer with a healthy path to
-  Tempo on OTLP :4317 / Zipkin :9411), but istiod 1.30.2 has been observed **not attaching
-  the `Telemetry` tracing to the sidecar HTTP listeners** (no `random_sampling` in the Envoy
-  config → no spans). The **Kiali graph works regardless** (it uses metrics, not traces).
-  Workarounds to try: a different Istio minor, or the legacy `meshConfig.defaultConfig.tracing.zipkin`
-  path pointing at `tempo-tempo-distributor.observability.svc:9411`.
+- **Tracing uses the legacy Zipkin path on purpose.** The Telemetry-API OpenTelemetry
+  provider did **not** attach to the sidecar listeners on istiod 1.30.2 (no spans exported),
+  so `install_istio` configures `meshConfig.defaultConfig.tracing.zipkin` →
+  `tempo-tempo-distributor.observability.svc:9411` instead, which writes the tracer into each
+  sidecar's bootstrap and reliably fires. If you change Istio versions and traces stop, this
+  is the knob (`MESH_TRACING_ZIPKIN`).
+- **emojivoto app images can hit the Docker Hub anonymous pull-rate limit**
+  (`docker.l5d.io/buoyantio/emojivoto-*` → `toomanyrequests`) after a session with many image
+  pulls — the sidecar injects fine but the app container stays `ImagePullBackOff`. It clears
+  when the limit resets (or add a pull secret / mirror). ArgoCD shows the app `Synced`
+  regardless.
 - **Heavy Boutique services can crash-loop under an overcommitted worker.** `emailservice`/
   `recommendationservice` may fail their `:15020/app-health` probes (`context deadline
   exceeded`) and restart when the node is CPU-throttled. `holdApplicationUntilProxyStarts`

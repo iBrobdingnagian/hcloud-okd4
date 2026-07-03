@@ -26,8 +26,8 @@ isn't installed it calls the matching `install_*` (e.g. `install_argocd`,
 | 20 | `appsim-cicd`     | Full CI/CD GitOps loop (see below) | kaniko-built podinfo | heavy |
 | 21 | `appsim-all`      | `appsim-gitops` + `appsim-events` + `appsim-awx` (the light subset) | — | medium |
 | 27 | `appsim-mesh`     | Online Boutique **inside an Istio mesh**, observed by Kiali/Jaeger | Online Boutique | heavy |
-| 28 | `appsim-bookinfo` | Istio **Bookinfo** in the mesh + in-mesh traffic generator | [Bookinfo](https://github.com/istio/istio/tree/master/samples/bookinfo) | light |
-| 29 | `appsim-emojivoto`| Buoyant **emojivoto** in the mesh (built-in vote-bot traffic) | [emojivoto](https://github.com/BuoyantIO/emojivoto) | light |
+| 28 | `appsim-bookinfo` | Istio **Bookinfo** in the mesh (ArgoCD) + in-mesh traffic generator | [Bookinfo](https://github.com/istio/istio/tree/master/samples/bookinfo) | light |
+| 29 | `appsim-emojivoto`| Buoyant **emojivoto** in the mesh (ArgoCD/kustomize; built-in vote-bot) | [emojivoto](https://github.com/BuoyantIO/emojivoto) | light |
 
 The original Kafka traffic demo is still there as `appsim` (menu 11). The mesh scenarios
 (`appsim-mesh`, `appsim-bookinfo`, `appsim-emojivoto`) and the mesh/tracing UIs (Istio,
