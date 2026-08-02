@@ -34,9 +34,12 @@ covers scanning; [ARCHITECTURE.md](ARCHITECTURE.md) is the big picture).
     for the Envoy sidecar (fewer startup-race crash-loops).
   - **Tracing** to Tempo's Zipkin receiver via `meshConfig.defaultConfig.tracing.zipkin`
     (`tempo-tempo-distributor.observability.svc:9411`, `MESH_TRACING_ZIPKIN` overrides,
-    `sampling=100`). The legacy bootstrap tracer is used deliberately — the Telemetry-API
-    OpenTelemetry provider did **not** attach to sidecars on istiod 1.30 (no spans). Once
-    `jaeger` is installed, mesh app traces show up in the Jaeger UI.
+    `sampling=100`) — but **only wired when that Tempo receiver actually exists** (install
+    `jaeger`/operator Tempo first, or set `MESH_TRACING_ZIPKIN`); otherwise istiod installs
+    without tracing rather than pointing sidecars at a dead endpoint. The legacy bootstrap
+    tracer is used deliberately — the Telemetry-API OpenTelemetry provider did **not** attach
+    to sidecars on istiod 1.30 (no spans). Once `jaeger` is installed, mesh app traces show
+    up in the Jaeger UI.
   - An `istiod` ServiceMonitor scrapes control-plane metrics into UWM.
 - **Kiali** (`install_kiali`) — Helm `kiali-server` in `istio-system`, `anonymous` auth.
   For the **graph to actually populate** the installer now also:
@@ -47,7 +50,10 @@ covers scanning; [ARCHITECTURE.md](ARCHITECTURE.md) is the big picture).
     metrics (`istio_requests_total`) reach UWM;
   - exposes a **reencrypt** route to port **20001** (Kiali serves HTTPS there; an edge
     route to `http` yields a 503/400 "Application is not available").
-  - Route `https://kiali.<apps>`; also wired to tracing (Tempo/Jaeger) and Grafana.
+  - Route `https://kiali.<apps>`. Its **tracing** (operator Tempo's Jaeger UI) and **Grafana**
+    external-service links are wired **only when those components are present** — if `jaeger`/
+    operator Tempo or the monitoring Grafana isn't installed, Kiali comes up with that link
+    disabled (and prints a hint) instead of a dead link. Install them and re-run to enable.
 - **Jaeger** (`install_jaeger`) — exposes the Jaeger UI the **operator** `TempoStack`
   already runs. Ensures operator Tempo (S3 = in-cluster MinIO), then routes
   `https://jaeger.<apps>`. (Helm single-binary Tempo has no Jaeger UI.)

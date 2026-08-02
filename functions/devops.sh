@@ -1488,14 +1488,26 @@ install_istio() {
   # deploys). The legacy defaultConfig.tracing writes the tracer straight into each
   # sidecar's bootstrap and reliably fires — unlike the Telemetry API's OpenTelemetry
   # provider, which istiod 1.30 was observed NOT to attach to the sidecar listeners
-  # (no spans). Override the target with MESH_TRACING_ZIPKIN. sampling=100 for the lab.
-  local zipkin_addr=${MESH_TRACING_ZIPKIN:-tempo-tempo-distributor.observability.svc:9411}
+  # (no spans). Only wire it when a Tempo Zipkin receiver actually exists (operator
+  # TempoStack distributor :9411) so we don't hand sidecars a dead trace endpoint;
+  # an explicit MESH_TRACING_ZIPKIN always wins. sampling=100 for the lab.
+  local -a trace_args=()
+  local zipkin_addr=${MESH_TRACING_ZIPKIN:-}
+  if [ -z "$zipkin_addr" ] && oc -n observability get svc tempo-tempo-distributor >/dev/null 2>&1; then
+    zipkin_addr=tempo-tempo-distributor.observability.svc:9411
+  fi
+  if [ -n "$zipkin_addr" ]; then
+    echo "    mesh tracing -> $zipkin_addr"
+    trace_args=(--set meshConfig.enableTracing=true \
+      --set "meshConfig.defaultConfig.tracing.zipkin.address=$zipkin_addr" \
+      --set meshConfig.defaultConfig.tracing.sampling=100)
+  else
+    echo "    no Tempo Zipkin receiver found — install 'jaeger' (operator Tempo) for mesh traces; skipping tracing wiring"
+  fi
   helm upgrade --install istiod istio/istiod -n istio-system \
     --set global.platform=openshift \
-    --set meshConfig.enableTracing=true \
     --set meshConfig.defaultConfig.holdApplicationUntilProxyStarts=true \
-    --set "meshConfig.defaultConfig.tracing.zipkin.address=$zipkin_addr" \
-    --set meshConfig.defaultConfig.tracing.sampling=100 \
+    "${trace_args[@]}" \
     --wait --timeout 6m >/dev/null 2>&1 \
     || echo "    istiod helm reported an error — check: oc -n istio-system get pods"
   # holdApplicationUntilProxyStarts: make app containers wait for the Envoy sidecar
@@ -1553,17 +1565,40 @@ install_kiali() {
   # Kiali doesn't trust — hence prometheus.auth: bearer/use_kiali_token/skip-verify.
   # Without this Kiali logs "x509: certificate signed by unknown authority" and the
   # graph stays empty ("metrics features temporarily unavailable").
+  # Only wire the tracing/Grafana external services when those components are
+  # actually present, so Kiali doesn't ship dead links (same detect-then-wire
+  # discipline as _grafana_add_datasource). Prometheus (UWM) is always available.
+  local -a ext_args=(
+    --set auth.strategy=anonymous
+    --set external_services.prometheus.url=https://thanos-querier.openshift-monitoring.svc:9091
+    --set external_services.prometheus.auth.type=bearer
+    --set external_services.prometheus.auth.use_kiali_token=true
+    --set external_services.prometheus.auth.insecure_skip_verify=true
+  )
+  # tracing: the operator TempoStack's Jaeger query UI (:16686) — helm single-binary
+  # Tempo has no such UI, so only wire when the operator query-frontend svc exists.
+  if oc -n observability get svc tempo-tempo-query-frontend >/dev/null 2>&1; then
+    ext_args+=(
+      --set external_services.tracing.enabled=true
+      --set external_services.tracing.use_grpc=false
+      --set external_services.tracing.internal_url=http://tempo-tempo-query-frontend.observability.svc:16686
+    )
+  else
+    ext_args+=(--set external_services.tracing.enabled=false)
+    echo "    no operator Tempo (Jaeger UI) found — install 'jaeger' to link traces in Kiali"
+  fi
+  # Grafana link only if the monitoring Grafana is deployed
+  if oc -n grafana get svc grafana >/dev/null 2>&1; then
+    ext_args+=(
+      --set external_services.grafana.enabled=true
+      --set external_services.grafana.internal_url=http://grafana.grafana.svc:3000
+    )
+  else
+    ext_args+=(--set external_services.grafana.enabled=false)
+    echo "    no monitoring Grafana found — run --monitoring to link Grafana in Kiali"
+  fi
   helm upgrade --install kiali-server kiali/kiali-server -n istio-system \
-    --set auth.strategy=anonymous \
-    --set external_services.prometheus.url=https://thanos-querier.openshift-monitoring.svc:9091 \
-    --set external_services.prometheus.auth.type=bearer \
-    --set external_services.prometheus.auth.use_kiali_token=true \
-    --set external_services.prometheus.auth.insecure_skip_verify=true \
-    --set external_services.tracing.enabled=true \
-    --set external_services.tracing.use_grpc=false \
-    --set external_services.tracing.internal_url=http://tempo-tempo-query-frontend.observability.svc:16686 \
-    --set external_services.grafana.enabled=true \
-    --set external_services.grafana.internal_url=http://grafana.grafana.svc:3000 \
+    "${ext_args[@]}" \
     --wait --timeout 5m >/dev/null 2>&1 \
     || echo "    Kiali helm reported an error — check: oc -n istio-system get pods -l app=kiali"
   # let the Kiali SA query thanos-querier (platform + UWM metrics)
@@ -1614,13 +1649,19 @@ install_devops() {
   oc whoami >/dev/null 2>&1 || { echo "    cannot reach the cluster — is it running?"; return 1; }
 
   local selected="" want
+  : "${DEVOPS_NOTE:=}"
+  # Interactive runs loop: after each install round the menu is redrawn so you can
+  # keep picking tools without relaunching the script. Pick 0 (Done/Back) to leave.
+  while true; do
+    selected=""
   if [ -n "$FLAG_DEVOPS_COMPONENTS" ]; then
     selected=$(echo "$FLAG_DEVOPS_COMPONENTS" | tr ',' ' ')
   elif [ "$ASSUME_YES" = 1 ]; then
     selected="cert-manager argocd jenkins"   # safe defaults; gitlab is heavy/opt-in
   else
     echo
-    echo "DevOps tooling to install (space-separated numbers, e.g. '1 2 3'):"
+    echo "DevOps tooling to install (space-separated numbers, e.g. '1 2 3'; 0 = done/back):"
+    echo "  0) Done / Back  — finish DevOps and continue the deployment"
     echo "  1) cert-manager — certificate automation (operator)"
     echo "  2) ArgoCD       — GitOps (argocd-operator)"
     echo "  3) Jenkins      — CI (bundled image, OpenShift OAuth login)"
@@ -1652,10 +1693,11 @@ install_devops() {
     echo " 28) Sim:Bookinfo — Istio Bookinfo in the mesh + traffic gen (classic Kiali demo)"
     echo " 29) Sim:Emoji    — emojivoto in the mesh (built-in vote-bot traffic)"
     echo " 30) All          — all DevOps tools (no app simulations)"
-    printf 'Selection [1 2 3]: '
-    read -r DSEL; DSEL=${DSEL:-1 2 3}
+    printf 'Selection [1 2 3, or 0 to finish]: '
+    read -r DSEL || DSEL=0; DSEL=${DSEL:-1 2 3}   # Ctrl-D / EOF => 0 (done)
     for n in $DSEL; do
       case "$n" in
+        0|q|Q|done|back|quit) selected="$selected __back__" ;;
         1) selected="$selected cert-manager" ;;
         2) selected="$selected argocd" ;;
         3) selected="$selected jenkins" ;;
@@ -1707,8 +1749,14 @@ install_devops() {
         ;;
     esac
   fi
+  # 0 / Done / Back from the interactive menu: leave the loop without installing.
+  case " $selected " in *" __back__ "*) echo "    DevOps: continuing the deployment"; break ;; esac
   selected=$(echo "$selected" | tr ' ' '\n' | awk 'NF' | sort -u | tr '\n' ' ')
-  [ -n "$(echo "$selected" | tr -d ' ')" ] || { echo "    nothing selected"; return 0; }
+  if [ -z "$(echo "$selected" | tr -d ' ')" ]; then
+    echo "    nothing selected"
+    # non-interactive selection was empty: done. Interactive: redraw the menu.
+    if [ -n "$FLAG_DEVOPS_COMPONENTS" ] || [ "$ASSUME_YES" = 1 ]; then break; else continue; fi
+  fi
   log "DevOps install: ${selected}"
 
   # cert-manager first so GitLab can use it; sort -u already orders it ahead of
@@ -1758,5 +1806,10 @@ install_devops() {
     *" otel "*)          install_otel helm     || true ;;
   esac
   [ -n "$DEVOPS_NOTE" ] && log "DevOps tooling:$DEVOPS_NOTE"
+  DEVOPS_NOTE=""   # per-round summary — reset before the menu is redrawn
+  # non-interactive selections (flags / --yes) run once; the interactive menu loops
+  # back so you can install another component without relaunching the script.
+  if [ -n "$FLAG_DEVOPS_COMPONENTS" ] || [ "$ASSUME_YES" = 1 ]; then break; fi
+  done
   return 0
 }
