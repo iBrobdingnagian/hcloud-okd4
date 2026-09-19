@@ -27,3 +27,7 @@ letsencrypt-backup/
 
 # DEFCON scenario state and scores (local only)
 .defcon/
+
+# local deploy run logs
+deploy-run.log
+deploy-start.txt
