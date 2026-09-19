@@ -62,7 +62,12 @@ install_cluster_autoscaler() {
   # the hostname to "<servername>.<domain>" — i.e. the k8s node registers as
   # "worker-asc-<id>.${DOMAIN}".
   local hn_script hn_unit
-  hn_script=$(cat <<SH
+  # NOTE: this must be `read -d '' <<SH` rather than `hn_script=$(cat <<SH ...)`
+  # — bash 3.2 (macOS's system /bin/bash, since newer bash is GPLv3) fails to
+  # parse a case/esac inside a heredoc that is itself nested inside a $(...)
+  # command substitution ("syntax error near unexpected token ';;'"); reading
+  # the heredoc directly avoids the nested $(...) and sidesteps the bug.
+  IFS= read -r -d '' hn_script <<SH || true
 #!/bin/bash
 set -e
 name=""
@@ -73,10 +78,16 @@ for i in \$(seq 1 30); do
   sleep 2
 done
 [ -n "\$name" ] || exit 0
-case "\$name" in *.${DOMAIN}) fqdn="\$name";; *) fqdn="\$name.${DOMAIN}";; esac
+case "\$name" in
+  *.${DOMAIN})
+    fqdn="\$name"
+    ;;
+  *)
+    fqdn="\$name.${DOMAIN}"
+    ;;
+esac
 /usr/bin/hostnamectl set-hostname "\$fqdn"
 SH
-)
   hn_unit=$(cat <<'UNIT'
 [Unit]
 Description=Set hostname from Hetzner Cloud metadata (autoscaled node)

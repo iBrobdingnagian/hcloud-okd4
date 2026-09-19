@@ -302,13 +302,26 @@ grep -q '^TF_VAR_network_zone=' .env \
   || echo "TF_VAR_network_zone=$NETWORK_ZONE" >> .env
 
 # controlPlane.replicas = masters; compute.replicas stays 0 (terraform
-# creates the worker VMs; they join via CSR approval)
-python3 - "$MASTERS" <<'EOF'
+# creates the worker VMs; they join via CSR approval).
+# baseDomain/metadata.name must ALSO be synced from TF_VAR_dns_domain here,
+# every run: install-config.yaml is a standalone file that nothing else
+# updates, so if it's ever left over from a different domain (a prior
+# deploy, a manual edit, a copy-pasted example) it silently bakes a
+# DIFFERENT cluster identity into the ignition configs than the domain
+# Terraform actually provisions DNS/servers for — the API/MCS hostnames
+# openshift-install waits on then point at infrastructure that doesn't
+# exist, and the bootstrap hangs forever ("dial tcp ...: i/o timeout").
+python3 - "$MASTERS" "$DOMAIN" <<'EOF'
 import sys, yaml
 m = int(sys.argv[1])
+name, _, base = sys.argv[2].partition('.')
+if not base:
+    sys.exit(f"TF_VAR_dns_domain '{sys.argv[2]}' must be <name>.<base-domain>")
 d = yaml.safe_load(open('install-config.yaml'))
 d['controlPlane']['replicas'] = m
 d['compute'][0]['replicas'] = 0
+d['baseDomain'] = base
+d['metadata']['name'] = name
 yaml.safe_dump(d, open('install-config.yaml', 'w'), default_flow_style=False)
 EOF
 

@@ -67,7 +67,7 @@ variable "location" {
 
 variable "image" {
   type        = string
-  description = "Image selector (either fcos or rhcos)"
+  description = "Image selector (fcos)"
   default     = "fcos"
 }
 

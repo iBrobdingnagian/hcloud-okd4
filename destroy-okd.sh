@@ -117,8 +117,11 @@ fi
 
 log "Destroying infrastructure with terraform"
 # chown the workspace back to the host user afterwards (the toolbox runs as
-# root and would otherwise leave terraform state etc. root-owned)
-docker run --rm --dns 1.1.1.1 --env-file .env \
+# root and would otherwise leave terraform state etc. root-owned).
+# --platform=linux/amd64: the image is amd64-only (see the Makefile build
+# target) — pinned here too so a multi-arch registry manifest can never
+# cause docker to pick the wrong layer on an Apple Silicon host.
+docker run --rm --platform=linux/amd64 --dns 1.1.1.1 --env-file .env \
   -e TF_CLI_ARGS_destroy=-auto-approve \
   -v "$PWD":/workspace -w /workspace "$TOOLBOX" \
   bash -c "make destroy; rc=\$?; chown -R $(id -u):$(id -g) /workspace; exit \$rc"

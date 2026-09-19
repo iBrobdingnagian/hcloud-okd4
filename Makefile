@@ -1,14 +1,7 @@
 .DEFAULT_GOAL := build
 
-# ocp
-OPENSHIFT_MIRROR?=https://mirror.openshift.com/pub/openshift-v4
-OCP_RELEASE_CHANNEL?=stable-4.19
-
 # okd
 OKD_MIRROR?=https://github.com/okd-project/okd/releases/download
-
-# either okd or ocp
-DEPLOYMENT_TYPE?=okd
 
 # fixed release version
 OPENSHIFT_RELEASE?=none
@@ -18,13 +11,7 @@ CONTAINER_NAME?=quay.io/slauger/hcloud-okd4
 CONTAINER_TAG?=$(OPENSHIFT_RELEASE)
 
 # coreos
-ifeq ($(DEPLOYMENT_TYPE),ocp)
-	COREOS_IMAGE=rhcos
-else ifeq ($(DEPLOYMENT_TYPE),okd)
-	COREOS_IMAGE=fcos
-else
-	$(error installer only supports ocp or okd)
-endif
+COREOS_IMAGE=fcos
 
 # terraform switches
 BOOTSTRAP?=false
@@ -38,33 +25,28 @@ TF_VAR_fcos_release?=
 
 # openshift version
 .PHONY: latest_version
-latest_version: latest_version_$(DEPLOYMENT_TYPE)
-
-.PHONY: latest_version_okd
-latest_version_okd:
+latest_version:
 	@curl -s -H "Accept: application/vnd.github.v3+json" https://api.github.com/repos/okd-project/okd/tags | jq -j -r .[0].name
 
-.PHONY: latest_version_ocp
-latest_version_ocp:
-	@curl -s https://raw.githubusercontent.com/openshift/cincinnati-graph-data/master/channels/$(OCP_RELEASE_CHANNEL).yaml | egrep '(4\.[0-9]+\.[0-9]+)' | tail -n1 | cut -d" " -f2
 
 # fetch
 .PHONY: fetch
-fetch: fetch_$(DEPLOYMENT_TYPE)
-
-.PHONY: fetch_okd
-fetch_okd:
+fetch:
 	wget -O openshift-install-linux-$(OPENSHIFT_RELEASE).tar.gz $(OKD_MIRROR)/$(OPENSHIFT_RELEASE)/openshift-install-linux-$(OPENSHIFT_RELEASE).tar.gz
 	wget -O openshift-client-linux-$(OPENSHIFT_RELEASE).tar.gz $(OKD_MIRROR)/$(OPENSHIFT_RELEASE)/openshift-client-linux-$(OPENSHIFT_RELEASE).tar.gz
 
-.PHONY: fetch_ocp
-fetch_ocp:
-	wget -O openshift-install-linux-$(OPENSHIFT_RELEASE).tar.gz $(OPENSHIFT_MIRROR)/clients/ocp/$(OPENSHIFT_RELEASE)/openshift-install-linux-$(OPENSHIFT_RELEASE).tar.gz
-	wget -O openshift-client-linux-$(OPENSHIFT_RELEASE).tar.gz $(OPENSHIFT_MIRROR)/clients/ocp/$(OPENSHIFT_RELEASE)/openshift-client-linux-$(OPENSHIFT_RELEASE).tar.gz
 
 .PHONY: build
+# --platform=linux/amd64 is REQUIRED: openshift-install/oc are x86_64-only
+# releases (OKD ships no arm64 build), but `docker build` otherwise defaults
+# to the host's native platform. On Apple Silicon that silently produces an
+# arm64 image containing an x86_64 binary + arm64 glibc-compat shims — a
+# mismatch that crashes under Rosetta ("failed to open elf at
+# /lib64/ld-linux-x86-64.so.2") instead of just failing to build. Pinning the
+# platform keeps the whole image (base + compat libs + binaries) consistently
+# amd64, which Docker Desktop's Rosetta then translates as a single unit.
 build:
-	docker build --build-arg DEPLOYMENT_TYPE=$(DEPLOYMENT_TYPE) --build-arg OPENSHIFT_RELEASE=$(OPENSHIFT_RELEASE) -t $(CONTAINER_NAME):$(CONTAINER_TAG) .
+	docker build --platform=linux/amd64 --build-arg OPENSHIFT_RELEASE=$(OPENSHIFT_RELEASE) -t $(CONTAINER_NAME):$(CONTAINER_TAG) .
 
 .PHONY: test
 test:
@@ -76,7 +58,7 @@ push:
 
 .PHONY: run
 run:
-	docker run -it --hostname openshift-toolbox --mount type=bind,source="$(shell pwd)",target=/workspace --mount type=bind,source="$(HOME)/.ssh,target=/root/.ssh" $(CONTAINER_NAME):$(CONTAINER_TAG) /bin/bash
+	docker run -it --platform=linux/amd64 --hostname openshift-toolbox --mount type=bind,source="$(shell pwd)",target=/workspace --mount type=bind,source="$(HOME)/.ssh,target=/root/.ssh" $(CONTAINER_NAME):$(CONTAINER_TAG) /bin/bash
 
 .PHONY: generate_manifests
 generate_manifests:
@@ -92,8 +74,7 @@ generate_ignition:
 .PHONY: hcloud_image
 hcloud_image:
 	@if [ -z "$(HCLOUD_TOKEN)" ]; then echo "ERROR: HCLOUD_TOKEN is not set"; exit 1; fi
-	if [ "$(DEPLOYMENT_TYPE)" == "okd" ]; then (cd packer && packer build -var location=$(PACKER_LOCATION) -var server_type=$(PACKER_SERVER_TYPE) -var fcos_release=$(TF_VAR_fcos_release) -var fcos_url=$(shell openshift-install coreos print-stream-json | jq -r '.architectures.x86_64.artifacts.qemu.formats | (."qcow2.gz" // ."qcow2.xz").disk.location') hcloud-fcos.json); fi
-	if [ "$(DEPLOYMENT_TYPE)" == "ocp" ]; then (cd packer && packer build -var location=$(PACKER_LOCATION) -var server_type=$(PACKER_SERVER_TYPE) -var rhcos_url=$(shell openshift-install coreos print-stream-json | jq -r '.architectures.x86_64.artifacts.qemu.formats."qcow2.gz".disk.location') hcloud-rhcos.json); fi
+	(cd packer && packer build -var location=$(PACKER_LOCATION) -var server_type=$(PACKER_SERVER_TYPE) -var fcos_release=$(TF_VAR_fcos_release) -var fcos_url=$(shell openshift-install coreos print-stream-json | jq -r '.architectures.x86_64.artifacts.qemu.formats | (."qcow2.gz" // ."qcow2.xz").disk.location') hcloud-fcos.json)
 
 .PHONY: sign_csr
 sign_csr:

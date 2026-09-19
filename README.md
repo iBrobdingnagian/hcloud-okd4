@@ -342,11 +342,10 @@ You can set the desired release version with the `OPENSHIFT_RELEASE` environment
 Example:
 
 ```bash
-export DEPLOYMENT_TYPE=okd # Options: "okd" or "ocp", default is "okd"
 export OPENSHIFT_RELEASE=$(make latest_version) # or a fixed version like "4.19.9"
 ```
 
-For OCP (Red Hat OpenShift), you will also need a valid pull secret, available from cloud.redhat.com.
+A real Red Hat pull secret is not needed for OKD — leave the placeholder from `install-config.yaml.example` in place.
 
 ---
 
@@ -368,7 +367,7 @@ For OCP (Red Hat OpenShift), you will also need a valid pull secret, available f
    make generate_ignition
    ```
 5. Export required environment variables (see example in *Configuration*)
-6. Build Fedora/RedHat CoreOS image using Packer
+6. Build the Fedora CoreOS image using Packer
    ```bash
    make hcloud_image
    ```
@@ -453,26 +452,6 @@ export CLOUDFLARE_API_KEY=YOUR_API_KEY
 - Nodes are **not directly exposed to the internet** by default.
 - Only the load balancer is public accessible.
 - SSH access to nodes will only be possible with additional firewall configuration.
-
----
-
-## Deploying OCP (Red Hat OpenShift)
-
-To deploy OCP instead of OKD:
-
-```bash
-export DEPLOYMENT_TYPE=ocp
-export OPENSHIFT_RELEASE=4.19.9 # example version
-make fetch build run
-```
-
-You can also choose the latest version from a specific channel:
-
-```bash
-export OCP_RELEASE_CHANNEL=stable-4.19
-export OPENSHIFT_RELEASE=$(make latest_version)
-make fetch build run
-```
 
 ---
 

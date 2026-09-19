@@ -34,7 +34,10 @@ tb() {
   # workspace (manifests, ignition/auth/kubeconfig, terraform state, ...)
   # would otherwise end up root-owned on the host; chown it back regardless
   # of the command's exit status
-  docker run --rm --dns 1.1.1.1 --env-file .env \
+  # --platform=linux/amd64: the image is amd64-only (see the Makefile build
+  # target) — pinned here too so a multi-arch registry manifest can never
+  # cause docker to pick the wrong layer on an Apple Silicon host.
+  docker run --rm --platform=linux/amd64 --dns 1.1.1.1 --env-file .env \
     -e ANSIBLE_PRIVATE_KEY_FILE=/workspace/okd4_new_id_rsa \
     -e TF_CLI_ARGS_apply=-auto-approve \
     -v "$PWD":/workspace -w /workspace "$TOOLBOX" \

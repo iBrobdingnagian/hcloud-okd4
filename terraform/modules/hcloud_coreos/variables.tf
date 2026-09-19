@@ -107,7 +107,7 @@ variable "subnet" {
 
 variable "image_name" {
   type        = string
-  description = "Either fcos or rhcos (necessary for ignition rendering)"
+  description = "fcos (necessary for ignition rendering)"
   default     = "fcos"
 }
 
