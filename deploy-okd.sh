@@ -96,6 +96,13 @@ Usage: ./deploy-okd.sh [options]
   --yes             non-interactive: defaults for everything not given above
                     (profile 2: 3 masters, 3 workers, current region,
                     cheapest types, 8h)
+  --letsencrypt     publicly-trusted certificates for *.apps and api via cert-manager +
+                    Let's Encrypt (DNS-01 through Cloudflare); staging CA unless
+                    --letsencrypt-prod. Works on a fresh deploy and on a running cluster.
+                    Issued certificates are saved to letsencrypt-backup/ and reused on a
+                    redeploy of the same hostnames until they expire.
+  --letsencrypt-prod  use the production Let's Encrypt CA (browser-trusted; rate-limited)
+  --le-email E      ACME account email (default: CLOUDFLARE_EMAIL from .env)
   --help            this text
 USAGE
 }
@@ -107,6 +114,7 @@ FLAG_AUTOSCALE=0 FLAG_AUTOSCALE_MIN="" FLAG_AUTOSCALE_MAX="" FLAG_AUTOSCALE_INTE
 FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
 FLAG_RESCALE=0 FLAG_RESCALE_ROLE="" FLAG_RESCALE_TYPE=""
 FLAG_CA=0 FLAG_CA_TYPE="" FLAG_CA_MIN="" FLAG_CA_MAX="" FLAG_CA_SMOKE=0
+FLAG_LETSENCRYPT=0 FLAG_LE_PROD=0 FLAG_LE_EMAIL="" LETSENCRYPT_NOTE=""
 VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -140,6 +148,9 @@ while [ $# -gt 0 ]; do
     --ca-min)             FLAG_CA_MIN=${2:?--ca-min needs a value}; FLAG_CA=1; shift 2 ;;
     --ca-max)             FLAG_CA_MAX=${2:?--ca-max needs a value}; FLAG_CA=1; shift 2 ;;
     --ca-smoke-test)      FLAG_CA_SMOKE=1; shift ;;
+    --letsencrypt)        FLAG_LETSENCRYPT=1; shift ;;
+    --letsencrypt-prod)   FLAG_LETSENCRYPT=1; FLAG_LE_PROD=1; shift ;;
+    --le-email)           FLAG_LE_EMAIL=${2:?--le-email needs a value}; FLAG_LETSENCRYPT=1; shift 2 ;;
     --autoscale)          FLAG_AUTOSCALE=1; shift ;;
     --autoscale-min)      FLAG_AUTOSCALE_MIN=${2:?--autoscale-min needs a value}; shift 2 ;;
     --autoscale-max)      FLAG_AUTOSCALE_MAX=${2:?--autoscale-max needs a value}; shift 2 ;;
@@ -454,6 +465,11 @@ done
 oc get nodes
 [ "${READY:-0}" -ge "$EXPECTED" ] || err "not all nodes became Ready — approve remaining CSRs manually: oc get csr"
 
+# ── 11a. node roles (functions/scheduling.sh) ─────────────────────────────
+# 0 workers: masters keep the worker role (single node). 1+ workers: masters
+# become control-plane only and the workers carry the worker role.
+apply_node_roles "$WORKERS" || true
+
 # ── 11b. schedule the teardown (functions/autodestroy.sh) ─────────────────
 schedule_autodestroy
 
@@ -495,6 +511,20 @@ elif [ "$ASSUME_YES" = 0 ]; then
   fi
 fi
 
+# ── 11f. Let's Encrypt certificates (optional; functions/letsencrypt.sh) ──
+if [ "$FLAG_LETSENCRYPT" = 1 ]; then
+  install_letsencrypt || true
+elif [ "$ASSUME_YES" = 0 ]; then
+  printf "\nIssue Let's Encrypt certificates for *.apps and api (DNS-01 via Cloudflare)? [y/N]: "
+  read -r MKLE
+  if [ "$MKLE" = "y" ] || [ "$MKLE" = "Y" ]; then
+    printf 'Production CA (browser-trusted, rate-limited) instead of staging? [y/N]: '
+    read -r LEPROD
+    if [ "$LEPROD" = "y" ] || [ "$LEPROD" = "Y" ]; then FLAG_LE_PROD=1; fi
+    install_letsencrypt || true
+  fi
+fi
+
 # ── 12. summary ──────────────────────────────────────────────────────────
 KUBEADMIN_PW=$(cat ignition/auth/kubeadmin-password)
 if [ -n "$ADMIN_CREATED" ]; then
@@ -520,7 +550,8 @@ cat <<SUMMARY
 
   $AUTODESTROY_NOTE
   $MONITORING_NOTE${DEVOPS_NOTE:+
-  $DEVOPS_NOTE}
+  $DEVOPS_NOTE}${LETSENCRYPT_NOTE:+
+$LETSENCRYPT_NOTE}
 SUMMARY
 if [ -z "$ADMIN_CREATED" ]; then
 cat <<'HOWTO'

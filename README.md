@@ -65,6 +65,31 @@ When run interactively without `--masters`/`--workers`/`--master-type`/
    Selected automatically if you pass `--masters`/`--workers`/
    `--master-type`/`--worker-type` directly.
 
+### Let's Encrypt certificates (`--letsencrypt`)
+
+Publicly-trusted certificates for the console/apps (`*.apps.<domain>`) and the API (`api.<domain>`),
+issued by cert-manager with **DNS-01 through Cloudflare** (the same zone Terraform already uses):
+
+```bash
+./deploy-okd.sh --letsencrypt                 # staging CA (not browser-trusted; safe for labs)
+./deploy-okd.sh --letsencrypt --letsencrypt-prod   # production CA
+```
+
+It also appears in the menu shown for a running cluster ("Let's Encrypt"). It installs cert-manager if
+missing, creates the `letsencrypt-staging|prod` ClusterIssuer from `TF_VAR_cloudflare_api_token` and
+`CLOUDFLARE_EMAIL` (or `--le-email`), requests both certificates, then points the default
+IngressController and the API server at them. Renewal is automatic (cert-manager).
+
+- **Scaling:** the certificates belong to hostnames, not nodes, and the load balancer passes TCP through, so
+  adding/removing workers or masters needs nothing. Internal certificates (`api-int`, kubelets, etcd) stay on
+  the cluster CA and are not touched.
+- **Redeploys:** issued certificates are saved to `letsencrypt-backup/<domain>/<staging|prod>/` (gitignored,
+  **contains private keys**) and refreshed by `destroy-okd.sh`. A later deploy of the *same hostnames* reuses them
+  until they are within 7 days of expiry, so repeated lab redeploys do not hit Let's Encrypt's duplicate-certificate
+  rate limit (about 5 per week).
+- **kubeconfig:** a kubeconfig trusts only its own CA, so the issuing chain is appended to
+  `ignition/auth/kubeconfig` (the original is kept as `kubeconfig.orig`).
+
 ### Adaptive scaling
 
 If `deploy-okd.sh` finds an existing cluster for `TF_VAR_dns_domain` already

@@ -115,6 +115,28 @@ else
   echo "  none found"
 fi
 
+# ── keep the Let's Encrypt certificates for the next deploy of this domain ──
+# (they are reused until they expire; see functions/letsencrypt.sh). Best effort:
+# skipped silently when the cluster has no such secrets or is unreachable.
+if command -v oc >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -f ignition/auth/kubeconfig ]; then
+  export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+  LE_ENV=""
+  oc --request-timeout=15s get clusterissuer letsencrypt-prod >/dev/null 2>&1 && LE_ENV=prod
+  [ -z "$LE_ENV" ] && oc --request-timeout=15s get clusterissuer letsencrypt-staging >/dev/null 2>&1 && LE_ENV=staging
+  if [ -n "$LE_ENV" ]; then
+    LE_DIR="letsencrypt-backup/$TF_VAR_dns_domain/$LE_ENV"
+    mkdir -p "$LE_DIR" && chmod 700 letsencrypt-backup "letsencrypt-backup/$TF_VAR_dns_domain" "$LE_DIR"
+    for pair in openshift-ingress:apps-wildcard-tls openshift-config:api-cert-tls; do
+      ns=${pair%%:*}; sec=${pair##*:}
+      oc --request-timeout=15s -n "$ns" get secret "$sec" -o json 2>/dev/null \
+        | jq 'del(.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp,.metadata.ownerReferences,.metadata.managedFields)' > "$LE_DIR/$sec.json.tmp" \
+        && [ -s "$LE_DIR/$sec.json.tmp" ] && mv "$LE_DIR/$sec.json.tmp" "$LE_DIR/$sec.json" && chmod 600 "$LE_DIR/$sec.json"
+      rm -f "$LE_DIR/$sec.json.tmp"
+    done
+    log "Saved Let's Encrypt ($LE_ENV) certificates to $LE_DIR/ for reuse"
+  fi
+fi
+
 log "Destroying infrastructure with terraform"
 # chown the workspace back to the host user afterwards (the toolbox runs as
 # root and would otherwise leave terraform state etc. root-owned).
