@@ -240,6 +240,14 @@ EOF
     all)    sedi -E -e "s|^TF_VAR_server_type_master=.*|TF_VAR_server_type_master=$newtype|" \
                      -e "s|^TF_VAR_server_type_worker=.*|TF_VAR_server_type_worker=$newtype|" .env ;;
   esac
+  # the whole role now has one size: drop any per-node list so terraform does not
+  # try to put mixed sizes back (see functions/mixed-sizes.sh)
+  case "$role" in
+    master|all) env_set TF_VAR_server_types_master "" ;;
+  esac
+  case "$role" in
+    worker|all) env_set TF_VAR_server_types_worker "" ;;
+  esac
 
   log "Rescale complete — $role node(s) now $newtype"
   echo "    .env updated (TF_VAR_server_type_$role=$newtype). terraform reconciles on its"

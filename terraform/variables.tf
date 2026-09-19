@@ -83,6 +83,21 @@ variable "server_type_worker" {
   default     = "cpx41"
 }
 
+# Optional per-node sizes so nodes added later can use a different VM size:
+# comma-separated, position i = master0(i+1) / worker0(i+1); empty = the single
+# server_type_* for every node. (A plain string so it survives .env / xargs.)
+variable "server_types_master" {
+  type        = string
+  description = "Comma-separated server type per master (empty = server_type_master for all)"
+  default     = ""
+}
+
+variable "server_types_worker" {
+  type        = string
+  description = "Comma-separated server type per worker (empty = server_type_worker for all)"
+  default     = ""
+}
+
 variable "server_type_bootstrap" {
   type        = string
   description = "Server type for the bootstrap node"

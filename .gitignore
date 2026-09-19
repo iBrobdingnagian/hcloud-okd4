@@ -24,3 +24,6 @@ logs/
 
 # Let's Encrypt certificates saved for reuse across redeploys (contain private keys)
 letsencrypt-backup/
+
+# DEFCON scenario state and scores (local only)
+.defcon/

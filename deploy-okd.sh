@@ -67,6 +67,10 @@ Usage: ./deploy-okd.sh [options]
                     same syntax as --duration); defaults to --duration
   --scale           if an existing cluster is found, offer to add masters/
                     workers to it instead of refusing to proceed
+  --new-worker-type T  with --scale/--autoscale: VM size (e.g. cx43) for the worker(s)
+                    being ADDED; existing nodes keep their size. Default: same as now.
+                    Interactive --scale asks for it (Enter = same, ? = price list).
+  --new-master-type T  same for master(s) being added (experimental, see --scale)
   --rescale         change CPU/RAM of existing nodes in place WITHOUT destroying
                     the cluster (Hetzner change-type, disk kept). Rolling, one
                     node at a time (drain -> power off -> change type -> power on
@@ -96,6 +100,16 @@ Usage: ./deploy-okd.sh [options]
   --yes             non-interactive: defaults for everything not given above
                     (profile 2: 3 masters, 3 workers, current region,
                     cheapest types, 8h)
+  --defcon          DEFCON scenarios: deliberately break a RUNNING lab cluster in
+                    realistic, reversible ways (bad image, broken service, blocked
+                    network, cordoned nodes, dead router, bad auth, DNS ...) and
+                    practise repairing it. Levels 5 (minor) to 1 (blackout).
+                    API server, etcd and your kubeconfig are never touched.
+  --defcon-list     list the scenarios (no cluster needed)
+  --defcon-scenario ID   start scenario ID or 'random'
+  --defcon-status | --defcon-hint | --defcon-check | --defcon-solve | --defcon-restore
+                    current mission | next hint (3 each) | verify your repair |
+                    show the answer | undo everything and return to normal
   --letsencrypt     publicly-trusted certificates for *.apps and api via cert-manager +
                     Let's Encrypt (DNS-01 through Cloudflare); staging CA unless
                     --letsencrypt-prod. Works on a fresh deploy and on a running cluster.
@@ -115,6 +129,8 @@ FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
 FLAG_RESCALE=0 FLAG_RESCALE_ROLE="" FLAG_RESCALE_TYPE=""
 FLAG_CA=0 FLAG_CA_TYPE="" FLAG_CA_MIN="" FLAG_CA_MAX="" FLAG_CA_SMOKE=0
 FLAG_LETSENCRYPT=0 FLAG_LE_PROD=0 FLAG_LE_EMAIL="" LETSENCRYPT_NOTE=""
+FLAG_NEW_MASTER_TYPE="" FLAG_NEW_WORKER_TYPE=""
+FLAG_DEFCON="" FLAG_DEFCON_ID=""
 VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -148,6 +164,16 @@ while [ $# -gt 0 ]; do
     --ca-min)             FLAG_CA_MIN=${2:?--ca-min needs a value}; FLAG_CA=1; shift 2 ;;
     --ca-max)             FLAG_CA_MAX=${2:?--ca-max needs a value}; FLAG_CA=1; shift 2 ;;
     --ca-smoke-test)      FLAG_CA_SMOKE=1; shift ;;
+    --new-master-type)    FLAG_NEW_MASTER_TYPE=${2:?--new-master-type needs a server type}; shift 2 ;;
+    --new-worker-type)    FLAG_NEW_WORKER_TYPE=${2:?--new-worker-type needs a server type}; shift 2 ;;
+    --defcon)             FLAG_DEFCON=menu; shift ;;
+    --defcon-list)        FLAG_DEFCON=list; shift ;;
+    --defcon-scenario)    FLAG_DEFCON=scenario; FLAG_DEFCON_ID=${2:?--defcon-scenario needs an id or 'random'}; shift 2 ;;
+    --defcon-status)      FLAG_DEFCON=status; shift ;;
+    --defcon-hint)        FLAG_DEFCON=hint; shift ;;
+    --defcon-check)       FLAG_DEFCON=check; shift ;;
+    --defcon-solve)       FLAG_DEFCON=solve; shift ;;
+    --defcon-restore)     FLAG_DEFCON=restore; shift ;;
     --letsencrypt)        FLAG_LETSENCRYPT=1; shift ;;
     --letsencrypt-prod)   FLAG_LETSENCRYPT=1; FLAG_LE_PROD=1; shift ;;
     --le-email)           FLAG_LE_EMAIL=${2:?--le-email needs a value}; FLAG_LETSENCRYPT=1; shift 2 ;;
@@ -161,6 +187,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "$FLAG_DEFCON" = list ]; then defcon_list; exit 0; fi
+
 # ── pre-flight checks (functions/preflight.sh) ───────────────────────────
 preflight_checks
 
@@ -173,6 +201,11 @@ if [ -n "$DOMAIN" ]; then
     | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | endswith("." + $d))] | length')
 else
   EXISTING_SERVERS=0
+fi
+
+# ── 0. DEFCON scenarios need a running cluster (never start a deploy for them) ─
+if [ -n "$FLAG_DEFCON" ] && [ "${EXISTING_SERVERS:-0}" -le 0 ] 2>/dev/null; then
+  err "DEFCON scenarios need a running cluster for $DOMAIN, found none — deploy one first"
 fi
 
 # ── 0. autoscaler mode: a foreground watch loop against a running cluster ─

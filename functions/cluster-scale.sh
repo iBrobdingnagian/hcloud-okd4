@@ -52,6 +52,9 @@ handle_existing_cluster() {
   elif [ "${FLAG_LETSENCRYPT:-0}" = 1 ]; then
     install_letsencrypt || exit 1
     exit 0
+  elif [ -n "${FLAG_DEFCON:-}" ]; then
+    run_defcon || exit 1
+    exit 0
   elif [ "$ASSUME_YES" = 1 ]; then
     err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale / --rescale / --monitoring"
   else
@@ -68,9 +71,10 @@ handle_existing_cluster() {
     echo "  5) DevOps — install cert-manager / ArgoCD / Jenkins / GitLab / Harbor / JFrog / AWX"
     echo "  6) Cluster Autoscaler — Hetzner-API node pool (scales on Pending pods)"
     echo "  7) Let's Encrypt — publicly-trusted certificates for *.apps and api (staging or production)"
-    echo "  8) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
-    printf 'Selection [8]: '
-    read -r SCSEL; SCSEL=${SCSEL:-8}
+    echo "  8) DEFCON scenarios — break the lab cluster on purpose and practise repairing it"
+    echo "  9) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
+    printf 'Selection [9]: '
+    read -r SCSEL; SCSEL=${SCSEL:-9}
     case "$SCSEL" in
       1) DO_SCALE=1 ;;
       2) run_rescale || exit 1
@@ -89,6 +93,9 @@ handle_existing_cluster() {
          read -r LEPROD
          [ "$LEPROD" = "y" ] || [ "$LEPROD" = "Y" ] && FLAG_LE_PROD=1
          install_letsencrypt || exit 1
+         exit 0 ;;
+      8) FLAG_DEFCON=menu
+         run_defcon || exit 1
          exit 0 ;;
     esac
   fi
@@ -162,6 +169,14 @@ MDOWNWARN
     fi
   fi
 
+  # nodes being ADDED may use a different VM size than the existing ones
+  if [ "$NEW_WORKERS" -gt "$CUR_WORKERS" ]; then
+    choose_new_node_type worker $((NEW_WORKERS - CUR_WORKERS))
+  fi
+  if [ "$NEW_MASTERS" -gt "$CUR_MASTERS" ]; then
+    choose_new_node_type master $((NEW_MASTERS - CUR_MASTERS))
+  fi
+
   apply_scale
   exit 0
 }
@@ -226,6 +241,9 @@ apply_scale() {
       oc delete node "$NODE" 2>/dev/null || true
     done
   fi
+
+  # per-node VM sizes: existing nodes keep their real size, new ones get the chosen type
+  plan_node_types || return 1
 
   sedi -E \
     -e "s|^TF_VAR_replicas_master=.*|TF_VAR_replicas_master=$NEW_MASTERS|" \

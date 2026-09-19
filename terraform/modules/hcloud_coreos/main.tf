@@ -2,7 +2,7 @@ resource "hcloud_server" "server" {
   count       = var.instance_count
   name        = "${format("${var.name}%02d", count.index + 1)}.${var.dns_domain}"
   image       = var.image
-  server_type = var.server_type
+  server_type = coalesce(try(var.server_types[count.index], ""), var.server_type)
   keep_disk   = var.keep_disk
   ssh_keys    = var.ssh_keys
   user_data = templatefile("${path.module}/templates/ignition.ign", {
