@@ -41,22 +41,36 @@ node_roles_ok() {
   return $bad
 }
 
-# apply_node_roles <worker-count> — flip the setting, wait for labels, restart the router
+# place_router <worker-count> — pin the default router to worker nodes.
+# A cluster installed with 0 workers has infrastructureTopology=SingleReplica, and
+# the ingress operator then puts the router on MASTERS (node-role...master=) for the
+# life of the cluster. Once masters become control-plane only (tainted) that router
+# has nowhere to run and every route, including the console, goes down. Selecting
+# the worker role works in both topologies: a schedulable master also carries it.
+place_router() {
+  local workers=$1 replicas=1
+  [ "$workers" -ge 2 ] && replicas=2
+  _oc_retry -n openshift-ingress-operator patch ingresscontroller/default --type=merge \
+    -p "{\"spec\":{\"replicas\":$replicas,\"nodePlacement\":{\"nodeSelector\":{\"matchLabels\":{\"node-role.kubernetes.io/worker\":\"\"}}}}}" >/dev/null \
+    || { echo "    WARNING: could not move the router to worker nodes — run: oc -n openshift-ingress-operator patch ingresscontroller/default --type=merge -p '{\"spec\":{\"nodePlacement\":{\"nodeSelector\":{\"matchLabels\":{\"node-role.kubernetes.io/worker\":\"\"}}}}}'"; return 1; }
+  echo "    router -> worker nodes ($replicas replica(s))"
+  # wait until the router runs on the new nodes before anything is tainted
+  _oc_retry -n openshift-ingress rollout status deployment/router-default --timeout=240s >/dev/null \
+    || echo "    WARNING: router rollout not finished yet — check: oc -n openshift-ingress get pods"
+}
+
+# apply_node_roles <worker-count> — router first, then flip the setting, then verify
 apply_node_roles() {
   local workers=$1 want=true tries=0
   [ "$workers" -gt 0 ] && want=false
   log "Node roles: $workers worker(s) -> masters $([ "$want" = true ] && echo 'schedulable (worker role kept)' || echo 'control-plane only (worker role removed)')"
+  # ORDER MATTERS: the router must already be on workers before masters are tainted
+  place_router "$workers" || return 1
   set_masters_schedulable "$want" || return 1
   while [ $tries -lt 18 ]; do
     node_roles_ok "$workers" && break
     tries=$((tries+1)); sleep 10
   done
-  if [ "$want" = false ]; then
-    # the router was placed on the master while it was schedulable; moving it now
-    # puts ingress on the workers (its nodeSelector) instead of the control plane
-    _oc_retry -n openshift-ingress rollout restart deployment/router-default >/dev/null \
-      && echo "    router restarted so it lands on a worker"
-  fi
   oc --request-timeout=20s get nodes 2>/dev/null
   if node_roles_ok "$workers"; then
     echo "    node roles OK"
