@@ -8,6 +8,7 @@ resource "hcloud_server" "server" {
   user_data   = var.user_data
   location    = var.location
   backups     = var.backups
+  labels      = var.labels
   lifecycle {
     ignore_changes = [user_data, image]
   }

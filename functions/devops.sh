@@ -1648,7 +1648,7 @@ install_devops() {
   [ -f "$KUBECONFIG" ] || { echo "    no kubeconfig at $KUBECONFIG — cannot install DevOps tooling"; return 1; }
   oc whoami >/dev/null 2>&1 || { echo "    cannot reach the cluster — is it running?"; return 1; }
 
-  local selected="" want
+  local selected="" want failed=0
   : "${DEVOPS_NOTE:=}"
   # Interactive runs loop: after each install round the menu is redrawn so you can
   # keep picking tools without relaunching the script. Pick 0 (Done/Back) to leave.
@@ -1761,49 +1761,49 @@ install_devops() {
 
   # cert-manager first so GitLab can use it; sort -u already orders it ahead of
   # gitlab, but force it explicitly to be safe.
-  case " $selected " in *" cert-manager "*) install_certmanager || true ;; esac
+  case " $selected " in *" cert-manager "*) run_addon install_certmanager || failed=1 ;; esac
   for want in $selected; do
     case "$want" in
       cert-manager) ;;  # already done above
-      argocd)  install_argocd  || true ;;
-      jenkins) install_jenkins || true ;;
-      gitlab)  install_gitlab  || true ;;
-      harbor)  install_harbor  || true ;;
-      artifactory|jfrog) install_artifactory || true ;;
-      awx)     install_awx     || true ;;
-      sonarqube|sonar) install_sonarqube || true ;;
-      jaeger)          install_jaeger     || true ;;
-      opensearch|kibana) install_opensearch || true ;;
-      istio)           install_istio      || true ;;
-      kiali)           install_kiali      || true ;;
-      kafka|zookeeper)   install_kafka || true ;;
-      kafka-kraft|kraft) install_kafka_kraft || true ;;
-      strimzi-kafka|strimzi) install_strimzi || true ;;
-      appsim|app-sim|application-simulation) install_appsim || true ;;
-      appsim-gitops)   install_appsim_gitops   || true ;;
-      appsim-boutique) install_appsim_boutique || true ;;
-      appsim-events)   install_appsim_events   || true ;;
-      appsim-awx)      install_appsim_awx      || true ;;
-      appsim-cicd)     install_appsim_cicd     || true ;;
-      appsim-all)      install_appsim_gitops || true; install_appsim_events || true; install_appsim_awx || true ;;
-      appsim-mesh)     install_appsim_mesh || true ;;
-      appsim-bookinfo) install_appsim_bookinfo  || true ;;
-      appsim-emojivoto|appsim-emoji) install_appsim_emojivoto || true ;;
-      loki)            install_loki  helm     || true ;;
-      loki-operator)   install_loki  operator || true ;;
-      tempo)           install_tempo helm     || true ;;
-      tempo-operator)  install_tempo operator || true ;;
+      argocd)  run_addon install_argocd || failed=1 ;;
+      jenkins) run_addon install_jenkins || failed=1 ;;
+      gitlab)  run_addon install_gitlab || failed=1 ;;
+      harbor)  run_addon install_harbor || failed=1 ;;
+      artifactory|jfrog) run_addon install_artifactory || failed=1 ;;
+      awx)     run_addon install_awx || failed=1 ;;
+      sonarqube|sonar) run_addon install_sonarqube || failed=1 ;;
+      jaeger)          run_addon install_jaeger || failed=1 ;;
+      opensearch|kibana) run_addon install_opensearch || failed=1 ;;
+      istio)           run_addon install_istio || failed=1 ;;
+      kiali)           run_addon install_kiali || failed=1 ;;
+      kafka|zookeeper)   run_addon install_kafka || failed=1 ;;
+      kafka-kraft|kraft) run_addon install_kafka_kraft || failed=1 ;;
+      strimzi-kafka|strimzi) run_addon install_strimzi || failed=1 ;;
+      appsim|app-sim|application-simulation) run_addon install_appsim || failed=1 ;;
+      appsim-gitops)   run_addon install_appsim_gitops || failed=1 ;;
+      appsim-boutique) run_addon install_appsim_boutique || failed=1 ;;
+      appsim-events)   run_addon install_appsim_events || failed=1 ;;
+      appsim-awx)      run_addon install_appsim_awx || failed=1 ;;
+      appsim-cicd)     run_addon install_appsim_cicd || failed=1 ;;
+      appsim-all)      run_addon install_appsim_gitops || failed=1; run_addon install_appsim_events || failed=1; run_addon install_appsim_awx || failed=1 ;;
+      appsim-mesh)     run_addon install_appsim_mesh || failed=1 ;;
+      appsim-bookinfo) run_addon install_appsim_bookinfo || failed=1 ;;
+      appsim-emojivoto|appsim-emoji) run_addon install_appsim_emojivoto || failed=1 ;;
+      loki)            run_addon install_loki  helm || failed=1 ;;
+      loki-operator)   run_addon install_loki  operator || failed=1 ;;
+      tempo)           run_addon install_tempo helm || failed=1 ;;
+      tempo-operator)  run_addon install_tempo operator || failed=1 ;;
       otel|otel-operator) ;;  # deferred below so Tempo exists first (OTLP target)
-      observability|obs)      install_loki helm || true; install_tempo helm || true; install_otel helm || true ;;
-      observability-operator) install_loki operator || true; install_tempo operator || true; install_otel operator || true ;;
-      *) echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, sonarqube, jaeger, opensearch, istio, kiali, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-mesh, appsim-bookinfo, appsim-emojivoto, appsim-all)" ;;
+      observability|obs)      run_addon install_loki helm || failed=1; run_addon install_tempo helm || failed=1; run_addon install_otel helm || failed=1 ;;
+      observability-operator) run_addon install_loki operator || failed=1; run_addon install_tempo operator || failed=1; run_addon install_otel operator || failed=1 ;;
+      *) failed=1; echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, sonarqube, jaeger, opensearch, istio, kiali, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-mesh, appsim-bookinfo, appsim-emojivoto, appsim-all)" ;;
     esac
   done
   # OpenTelemetry last: its OTLP exporter targets Tempo, so Tempo must be up
   # first when both are selected à-la-carte (sort -u would otherwise run otel first).
   case " $selected " in
-    *" otel-operator "*) install_otel operator || true ;;
-    *" otel "*)          install_otel helm     || true ;;
+    *" otel-operator "*) run_addon install_otel operator || failed=1 ;;
+    *" otel "*)          run_addon install_otel helm || failed=1 ;;
   esac
   [ -n "$DEVOPS_NOTE" ] && log "DevOps tooling:$DEVOPS_NOTE"
   DEVOPS_NOTE=""   # per-round summary — reset before the menu is redrawn
@@ -1811,5 +1811,5 @@ install_devops() {
   # back so you can install another component without relaunching the script.
   if [ -n "$FLAG_DEVOPS_COMPONENTS" ] || [ "$ASSUME_YES" = 1 ]; then break; fi
   done
-  return 0
+  return "$failed"
 }

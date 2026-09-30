@@ -10,7 +10,6 @@ sedi() { if [ "$(uname)" = "Darwin" ]; then sed -i '' "$@"; else sed -i "$@"; fi
 
 # progress bar + elapsed/estimate per phase
 START_TS=$(date +%s)
-TOTAL_STEPS=9
 STEP=0
 elapsed() {
   local s=$(( $(date +%s) - START_TS ))
@@ -18,10 +17,7 @@ elapsed() {
 }
 step() {  # step "<title>" "<typical duration>"
   STEP=$((STEP+1))
-  local width=30 filled bar
-  filled=$(( STEP * width / TOTAL_STEPS ))
-  bar=$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' $((width-filled)) '' | tr ' ' '.')
-  printf '\n\033[1;34m[%s] step %d/%d — %s\033[0m\n' "$bar" "$STEP" "$TOTAL_STEPS" "$1"
+  printf '\n\033[1;34mPhase %d — %s\033[0m\n' "$STEP" "$1"
   printf '\033[0;36m    elapsed: %s | typical duration of this step: %s\033[0m\n' \
     "$(elapsed)" "$2"
 }
@@ -30,6 +26,13 @@ step() {  # step "<title>" "<typical duration>"
 # Desktop's resolver, which negative-caches our DNS records after a
 # destroy/recreate cycle.
 tb() {
+  case "$*" in
+    *"make infrastructure"*|*"make destroy"*)
+      if [ -s terraform/terraform.tfstate ]; then
+        python3 "$REPO_ROOT/scripts/check_state.py" terraform/terraform.tfstate "$TF_VAR_dns_domain" "${CLUSTER_ID:-}" || return 1
+      fi
+      ;;
+  esac
   # the toolbox runs as root, so anything it writes into the bind-mounted
   # workspace (manifests, ignition/auth/kubeconfig, terraform state, ...)
   # would otherwise end up root-owned on the host; chown it back regardless

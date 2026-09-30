@@ -17,6 +17,7 @@
 
 run_autoscale() {
   export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+  assert_cluster_context || return 1
   [ -f "$KUBECONFIG" ] || err "no kubeconfig at $KUBECONFIG — deploy a cluster first"
   oc whoami >/dev/null 2>&1 || err "cannot reach the cluster (KUBECONFIG=$KUBECONFIG) — is it running?"
 

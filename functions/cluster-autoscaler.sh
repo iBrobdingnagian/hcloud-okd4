@@ -39,7 +39,11 @@ install_cluster_autoscaler() {
   # default the pool to the SAME server type the existing workers run (so
   # autoscaled nodes match the cluster); fall back to cx33 if unknown
   local pooltype=${FLAG_CA_TYPE:-${TF_VAR_server_type_worker:-cx33}} pmin=${FLAG_CA_MIN:-0} pmax=${FLAG_CA_MAX:-3}
+  assert_cluster_context || return 1
+  # Record the controller even when its pool is empty, so teardown stops it first.
+  touch .cluster-autoscaler-installed
   local pool=worker-asc loc=${TF_VAR_location:-nbg1} net=${DOMAIN} cav=${CA_VERSION:-$CA_VERSION_DEFAULT}
+  [ -z "${CLUSTER_ID:-}" ] || pool="worker-asc-$CLUSTER_ID"
   case "$pmin$pmax" in *[!0-9]*) err "--ca-min/--ca-max must be numbers"; return 1;; esac
   [ "$pmax" -ge "$pmin" ] || { err "--ca-max ($pmax) must be >= --ca-min ($pmin)"; return 1; }
 

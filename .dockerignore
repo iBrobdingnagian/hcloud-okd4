@@ -8,3 +8,10 @@ terraform/.terraform
 terraform/.terraform*
 terraform/terraform.tfstate
 terraform/terraform.tfstate.backup
+
+.work/
+.secrets/
+.env
+*.pem
+*.key
+okd4_new_id_rsa*

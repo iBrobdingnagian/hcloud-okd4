@@ -1,3 +1,7 @@
+locals {
+  cluster_labels = var.cluster_id == "" ? {} : { "hcloud-okd4/cluster" = var.cluster_id }
+}
+
 module "ignition" {
   source         = "./modules/hcloud_instance"
   instance_count = var.bootstrap == true ? 1 : 0
@@ -10,6 +14,7 @@ module "ignition" {
   ssh_keys       = data.hcloud_ssh_keys.all_keys.ssh_keys.*.name
   server_type    = var.server_type_ignition
   subnet         = hcloud_network_subnet.subnet.id
+  labels         = local.cluster_labels
 }
 
 module "bootstrap" {
@@ -25,6 +30,7 @@ module "bootstrap" {
   server_type     = var.server_type_bootstrap
   subnet          = hcloud_network_subnet.subnet.id
   ignition_url    = var.bootstrap == true ? "http://${cloudflare_dns_record.dns_a_ignition[0].name}/bootstrap.ign" : ""
+  labels          = local.cluster_labels
 }
 
 module "master" {
@@ -38,11 +44,11 @@ module "master" {
   image           = data.hcloud_image.image.id
   image_name      = var.image
   server_type     = var.server_type_master
-  labels = {
+  labels = merge(local.cluster_labels, {
     "${var.dns_domain}/master"  = "true",
     "${var.dns_domain}/ingress" = "true"
     "cluster"                   = var.dns_domain
-  }
+  })
   subnet          = hcloud_network_subnet.subnet.id
   ignition_url    = "https://api-int.${var.dns_domain}:22623/config/master"
   ignition_cacert = local.ignition_master_cacert
@@ -59,11 +65,11 @@ module "worker" {
   image           = data.hcloud_image.image.id
   image_name      = var.image
   server_type     = var.server_type_worker
-  labels = {
+  labels = merge(local.cluster_labels, {
     "${var.dns_domain}/worker"  = "true"
     "${var.dns_domain}/ingress" = "true"
     "cluster"                   = var.dns_domain
-  }
+  })
   subnet          = hcloud_network_subnet.subnet.id
   ignition_url    = "https://api-int.${var.dns_domain}:22623/config/worker"
   ignition_cacert = local.ignition_worker_cacert

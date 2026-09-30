@@ -6,11 +6,13 @@
 # container-only make targets, CSR rounds).
 #
 set -euo pipefail
-cd "$(dirname "$0")"
+REPO_ROOT=$(cd "$(dirname "$0")" && pwd)
+. "$REPO_ROOT/functions/context.sh"
+cluster_dispatch deploy "$@"
 
 # Every helper/function lives in functions/*.sh — keep this file as the
 # orchestration flow only.
-for f in functions/*.sh; do
+for f in "$REPO_ROOT"/functions/*.sh; do
   # shellcheck source=/dev/null
   . "$f"
 done
@@ -18,6 +20,11 @@ done
 usage() {
   cat <<'USAGE'
 Usage: ./deploy-okd.sh [options]
+  --cluster NAME    use clusters/NAME.yaml and isolated .work/NAME/ artifacts
+  --plan            preview named-cluster configuration and live compute pricing
+                    (combine only with --cluster; creates no cloud resources)
+  --terraform-plan  show a Terraform resource diff using existing ignition/image
+  --resume          resume interrupted installation, preserving ignition and state
   --region X        Hetzner location (e.g. nbg1, fsn1, hel1, ash, hil, sin)
   --profile N       deployment profile (skips the interactive menu):
                       1 = Production - Best Servers (3 masters / 3 workers,
@@ -28,7 +35,7 @@ Usage: ./deploy-okd.sh [options]
                       4 = Manual (interactive picker, default)
   --lab-topology T  profile 3 only: 1x0, 1x1, 1x2, 1x3 or 3x3 (masters x workers)
   --lab-tier T      profile 3 only: low, mid or high (cost/spec tier)
-  --masters N       master count (1/3/5; even counts need confirmation)
+  --masters N       master count (1/3/5)
   --workers N       worker count
   --master-type T   server type for masters (e.g. cpx42)
   --worker-type T   server type for workers
@@ -107,9 +114,13 @@ FLAG_AUTOSCALE=0 FLAG_AUTOSCALE_MIN="" FLAG_AUTOSCALE_MAX="" FLAG_AUTOSCALE_INTE
 FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
 FLAG_RESCALE=0 FLAG_RESCALE_ROLE="" FLAG_RESCALE_TYPE=""
 FLAG_CA=0 FLAG_CA_TYPE="" FLAG_CA_MIN="" FLAG_CA_MAX="" FLAG_CA_SMOKE=0
+FLAG_RESUME=0 FLAG_TERRAFORM_PLAN=0
 VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
+    --resume)         FLAG_RESUME=1; shift ;;
+    --terraform-plan) FLAG_TERRAFORM_PLAN=1; shift ;;
+    --plan)           err "--plan requires --cluster NAME" ;;
     --region)         FLAG_REGION=${2:?--region needs a value}; shift 2 ;;
     --profile)        FLAG_PROFILE=${2:?--profile needs a value}; shift 2 ;;
     --lab-topology)   FLAG_LAB_TOPOLOGY=${2:?--lab-topology needs a value}; shift 2 ;;
@@ -150,16 +161,28 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+validate_deploy_flags
+load_env
+DOMAIN=${TF_VAR_dns_domain:?TF_VAR_dns_domain is required}
+export KUBECONFIG="$PWD/ignition/auth/kubeconfig"
+if [ "$FLAG_TERRAFORM_PLAN" = 1 ]; then
+  infrastructure_plan
+  exit 0
+fi
+if [ "$FLAG_RESUME" = 1 ]; then
+  [ "$FLAG_SCALE$FLAG_AUTOSCALE$FLAG_RESCALE$FLAG_ADMIN$FLAG_CA$FLAG_CA_SMOKE" = 000000 ] \
+    || err "--resume cannot be combined with another lifecycle operation"
+  [ -z "$FLAG_REGION$FLAG_RELEASE$FLAG_MASTERS$FLAG_WORKERS$FLAG_MASTER_TYPE$FLAG_WORKER_TYPE$FLAG_PROFILE" ] \
+    || err "--resume uses the recorded configuration; do not pass topology/release overrides"
+  phase_done configured || err "no deployment checkpoint; cannot resume safely"
+fi
+
 # ── pre-flight checks (functions/preflight.sh) ───────────────────────────
 preflight_checks
 
 # ── 0. adaptive scale-up: is there already a cluster for this domain? ────
-export $(grep -v '^#' .env | xargs)
-DOMAIN=${TF_VAR_dns_domain:-}
 if [ -n "$DOMAIN" ]; then
-  EXISTING_SERVERS=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
-    "https://api.hetzner.cloud/v1/servers" \
-    | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | endswith("." + $d))] | length')
+  EXISTING_SERVERS=$(cluster_servers | jq '.servers | length')
 else
   EXISTING_SERVERS=0
 fi
@@ -173,9 +196,16 @@ if [ "$FLAG_AUTOSCALE" = 1 ]; then
 fi
 
 # ── 0. existing cluster? offer scale / monitoring instead of a deploy ────
-if [ "${EXISTING_SERVERS:-0}" -gt 0 ] 2>/dev/null; then
+if [ "$FLAG_RESUME" = 0 ] && [ "${EXISTING_SERVERS:-0}" -gt 0 ] 2>/dev/null; then
+  if phase_done configured && ! phase_done ready; then
+    err "installation is incomplete; use --resume before day-2 operations"
+  fi
   handle_existing_cluster   # functions/cluster-scale.sh — always exits
 fi
+
+if [ "$FLAG_RESUME" = 0 ]; then
+  [ ! -d ignition ] && [ ! -d config ] \
+    || err "installation artifacts already exist; use --resume or archive them explicitly after teardown"
 
 # ── 0b. deployment profile (functions/profiles.sh) ────────────────────────
 select_profile
@@ -231,6 +261,11 @@ fi
 BOOTSTRAP_TYPE=$MASTER_TYPE BOOTSTRAP_PRICE=$MASTER_PRICE
 IGNITION_TYPE=$(echo "$CANDIDATES" | head -1 | cut -f1)
 IGNITION_PRICE=$(echo "$CANDIDATES" | head -1 | cut -f5)
+if [ -n "${CLUSTER_ID:-}" ]; then
+  IGNITION_TYPE=$TF_VAR_server_type_ignition
+  IGNITION_PRICE=$(echo "$CANDIDATES" | awk -F'\t' -v t="$IGNITION_TYPE" '$1 == t {print $5}')
+  [ -n "$IGNITION_PRICE" ] || err "configured ignition type $IGNITION_TYPE is unavailable in $LOC"
+fi
 
 # packer build server (temporary, only writes the CoreOS image in rescue
 # mode): keep cx33 if this region has it, else cheapest with >=4 GB RAM
@@ -312,7 +347,15 @@ d['compute'][0]['replicas'] = 0
 yaml.safe_dump(d, open('install-config.yaml', 'w'), default_flow_style=False)
 EOF
 
-export $(grep -v '^#' .env | xargs)
+load_env
+python3 "$REPO_ROOT/scripts/cluster_context.py" set-env .env LAB_DURATION "$DUR"
+phase_mark configured
+else
+  MASTERS=$TF_VAR_replicas_master WORKERS=$TF_VAR_replicas_worker
+  OPENSHIFT_RELEASE=${OPENSHIFT_RELEASE:?recorded release is missing}
+  DUR=${FLAG_DURATION:-${LAB_DURATION:-8}}
+  log "Resuming $DOMAIN with the recorded release and topology"
+fi
 TOOLBOX=quay.io/slauger/hcloud-okd4:$OPENSHIFT_RELEASE
 DOMAIN=$TF_VAR_dns_domain
 
@@ -328,28 +371,21 @@ else
   make build
 fi
 
-# ── 7. fresh install configs (certs are valid only 24h) ─────────────────
-if [ -d ignition/auth ] && [ -n "$(ls -A ignition/auth 2>/dev/null)" ]; then
-  BAK="ignition-auth-backup-$(date +%Y%m%d-%H%M%S)"
-  log "Backing up previous cluster credentials to $BAK/"
-  cp -r ignition/auth "$BAK"
+# ── 7. generate once; retain installer identity when resuming ──────────
+if ! phase_done ignition; then
+  step "Generating manifests and ignition configs" "~1 min"
+  if [ ! -f ignition/auth/kubeconfig ]; then
+    [ ! -d config ] || [ -f config/.openshift_install_state.json ] \
+      || err "partial config directory requires inspection; refusing to regenerate identity"
+    [ -d config ] || tb "make generate_manifests"
+    tb "make generate_ignition"
+  fi
+  validate_ignition
+  phase_mark ignition
+else
+  validate_ignition
+  log "Reusing existing ignition and cluster credentials"
 fi
-# Cleanup runs INSIDE the container as well: with Docker Desktop's virtiofs
-# mounts the container can briefly see a stale view of a dir removed on the
-# host — mkdir then fails with "File exists", and busybox rm can fail with
-# "can't remove ... No such file or directory" (stat says it exists, the
-# removal then hits ENOENT). A single rm exit code is therefore meaningless
-# here; what matters is the postcondition "the container sees them gone".
-rm -rf config ignition
-step "Generating manifests and ignition configs" "~1 min"
-tb 'for i in 1 2 3 4 5; do
-      rm -rf config ignition 2>/dev/null
-      [ ! -e config ] && [ ! -e ignition ] && exit 0
-      sleep 2
-    done
-    echo "ERROR: stale config/ignition still visible in the container after retries" >&2
-    exit 1'
-tb "make generate_manifests && make generate_ignition"
 
 # ── 8. CoreOS snapshot (reused when one exists for this release) ─────────
 step "CoreOS image" "skipped if a snapshot for this release exists, else 2-5 min"
@@ -359,10 +395,11 @@ FCOS_RELEASE=$(tb "openshift-install coreos print-stream-json \
 sedi -E -e "s|^TF_VAR_fcos_release=.*|TF_VAR_fcos_release=$FCOS_RELEASE|" .env
 grep -q '^TF_VAR_fcos_release=' .env \
   || echo "TF_VAR_fcos_release=$FCOS_RELEASE" >> .env
-# an API hiccup must never skip a NEEDED build — fall back to building
-SNAP_COUNT=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
+# A failed discovery must not trigger a new billable image build.
+SNAP_COUNT=$(curl -fsS --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $HCLOUD_TOKEN" \
   "https://api.hetzner.cloud/v1/images?type=snapshot&status=available&label_selector=os=fcos,fcos_release=$FCOS_RELEASE" \
-  | jq -r '.images | length' 2>/dev/null) || SNAP_COUNT=0
+  | jq -er '.images | if type == "array" then length else error("invalid image response") end') \
+  || err "could not discover CoreOS snapshots; retry with --resume when the API is available"
 if [ "${SNAP_COUNT:-0}" -gt 0 ] 2>/dev/null && [ "$REBUILD_IMAGE" = 0 ]; then
   echo "    snapshot for CoreOS $FCOS_RELEASE already exists — skipping build (--rebuild-image to force)"
 else
@@ -370,8 +407,10 @@ else
     || err "a CoreOS image build is needed (no snapshot for $FCOS_RELEASE) but outbound tcp/22 is blocked here — build once from a network that allows SSH, or pick a release whose snapshot exists"
   tb "make hcloud_image"
 fi
+phase_mark image
 
 # ── 9. infrastructure + bootstrap ────────────────────────────────────────
+if ! phase_done bootstrap-complete; then
 step "Deploying infrastructure (terraform + ansible, BOOTSTRAP=true)" "3-5 min"
 tb "make infrastructure BOOTSTRAP=true"
 flush_dns   # records were just (re)created — drop any negative cache
@@ -412,19 +451,25 @@ fi
 step "Waiting for bootstrap to complete" "15-40 min (longest phase)"
 echo "    Watcher is read-only; if it times out the install continues — retried once."
 tb "make wait_bootstrap" || { log "Watcher timed out — retrying once"; tb "make wait_bootstrap"; }
+phase_mark bootstrap-complete
+fi
 
 # ── 10. remove bootstrap, wait for completion ─────────────────────────────
+if ! phase_done bootstrap-removed; then
 step "Removing bootstrap + ignition nodes" "1-2 min"
 tb "make infrastructure"
+phase_mark bootstrap-removed
+fi
 
 # ── install watchdog (functions/watchdog.sh) runs during the wait ────────
 export KUBECONFIG=$PWD/ignition/auth/kubeconfig
 install_watchdog &
 WATCHDOG=$!
-trap '[ -n "${WATCHDOG:-}" ] && kill "$WATCHDOG" 2>/dev/null; [ -n "${RELDIR:-}" ] && rm -rf "$RELDIR"; :' EXIT
+trap 'deployment_status=$?; trap - EXIT; if [ -n "${WATCHDOG:-}" ]; then kill "$WATCHDOG" 2>/dev/null || true; fi; if [ -n "${RELDIR:-}" ]; then rm -rf "$RELDIR" || true; fi; exit "$deployment_status"' EXIT
 
 step "Waiting for install completion" "5-25 min"
 tb "make wait_completion" || { log "Watcher timed out — retrying once"; tb "make wait_completion"; }
+phase_mark installed
 kill "$WATCHDOG" 2>/dev/null || true
 
 # ── 11. join the workers (CSR rounds until everyone is Ready) ─────────────
@@ -440,6 +485,8 @@ while [ $tries -lt 60 ]; do
 done
 oc get nodes
 [ "${READY:-0}" -ge "$EXPECTED" ] || err "not all nodes became Ready — approve remaining CSRs manually: oc get csr"
+verify_cluster_health
+phase_mark ready
 
 # ── 11b. schedule the teardown (functions/autodestroy.sh) ─────────────────
 schedule_autodestroy
@@ -455,7 +502,7 @@ fi
 
 # ── 11d. monitoring & alerting (optional, gated on >12 GB RAM nodes) ─────
 if [ "$FLAG_MONITORING" = 1 ]; then
-  install_monitoring || true
+  install_monitoring || err "requested monitoring installation failed; rerun with --monitoring"
 elif [ "$ASSUME_YES" = 0 ]; then
   MON_MAX_GB=$(max_node_ram_gb)
   if awk -v g="${MON_MAX_GB:-0}" 'BEGIN{exit !(g+0>12)}'; then
@@ -473,7 +520,7 @@ fi
 
 # ── 11e. DevOps tooling (optional: ArgoCD / Jenkins / GitLab) ────────────
 if [ "$FLAG_DEVOPS" = 1 ]; then
-  install_devops || true
+  install_devops || err "one or more requested addons failed; rerun with --devops-components"
 elif [ "$ASSUME_YES" = 0 ]; then
   printf '\nInstall DevOps tooling (ArgoCD / Jenkins / GitLab)? [y/N]: '
   read -r MKDEV
@@ -483,13 +530,12 @@ elif [ "$ASSUME_YES" = 0 ]; then
 fi
 
 # ── 12. summary ──────────────────────────────────────────────────────────
-KUBEADMIN_PW=$(cat ignition/auth/kubeadmin-password)
 if [ -n "$ADMIN_CREATED" ]; then
   CRED_USER=$ADMIN_CREATED
   CRED_PASS="(the password you typed)"
 else
   CRED_USER=kubeadmin
-  CRED_PASS=$KUBEADMIN_PW
+  CRED_PASS="read $PWD/ignition/auth/kubeadmin-password (if kubeadmin is still enabled)"
 fi
 cat <<SUMMARY
 
@@ -502,8 +548,8 @@ cat <<SUMMARY
   Username    : $CRED_USER
   Password    : $CRED_PASS
 
-  CLI         : export KUBECONFIG=\$PWD/ignition/auth/kubeconfig
-  SSH         : ssh -i okd4_new_id_rsa core@<node-ip>
+  CLI         : export KUBECONFIG="$PWD/ignition/auth/kubeconfig"
+  SSH         : ssh -i "$PWD/okd4_new_id_rsa" core@<node-ip>
 
   $AUTODESTROY_NOTE
   $MONITORING_NOTE${DEVOPS_NOTE:+

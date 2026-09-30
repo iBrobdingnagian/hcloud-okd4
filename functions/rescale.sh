@@ -60,12 +60,14 @@ _wait_node_ready() {  # <node> <timeout_s>
 # wait until etcd is healthy again: all control-plane etcd pods Running and the
 # operator no longer Progressing (best-effort)
 _wait_etcd_healthy() {  # <expected-members> <timeout_s>
-  local want=$1 to=${2:-420} t=0 running prog
+  local want=$1 to=${2:-420} t=0 running healthy
   while [ "$t" -lt "$to" ]; do
-    running=$(oc -n openshift-etcd get pods -l app=etcd --no-headers 2>/dev/null \
-      | awk '$2 ~ /^([0-9]+)\/\1$/ && $3=="Running"' | wc -l | tr -d ' ')
-    prog=$(oc get etcd cluster -o jsonpath='{range .status.conditions[?(@.type=="Progressing")]}{.status}{end}' 2>/dev/null)
-    [ "${running:-0}" -ge "$want" ] && [ "$prog" != "True" ] && return 0
+    running=$(oc -n openshift-etcd get pods -l app=etcd -o json 2>/dev/null \
+      | jq '[.items[] | select(.status.phase == "Running" and any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length') || running=0
+    healthy=$(oc get clusteroperator etcd -o json 2>/dev/null | jq -r '
+      any(.status.conditions[]; .type == "Available" and .status == "True") and
+      all(.status.conditions[]; (.type != "Degraded" and .type != "Progressing") or .status == "False")') || healthy=false
+    [ "${running:-0}" -ge "$want" ] && [ "$healthy" = true ] && return 0
     sleep 10; t=$((t+10))
   done
   return 1
@@ -76,6 +78,7 @@ _wait_etcd_healthy() {  # <expected-members> <timeout_s>
 # decides to exit).
 run_rescale() {
   export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+  assert_cluster_context || return 1
   command -v jq >/dev/null 2>&1 || { err "jq is required for --rescale"; return 1; }
   [ -n "$HCLOUD_TOKEN" ] || { err "HCLOUD_TOKEN is not set (.env)"; return 1; }
   oc whoami >/dev/null 2>&1 || { echo "    cannot reach the cluster — is it running?"; return 1; }
@@ -141,7 +144,7 @@ EOF
 
   # ── build the ordered node list from the live Hetzner inventory ────────
   local srv_json prefixes p
-  srv_json=$(_hc GET "/servers?per_page=100")
+  srv_json=$(cluster_servers) || return 1
   case "$role" in master) prefixes="master";; worker) prefixes="worker";; all) prefixes="master worker";; esac
   local plan=""   # lines: "<name> <id> <curtype> <curdisk>"
   for p in $prefixes; do
@@ -195,9 +198,11 @@ EOF
 
     log "Rescaling $nm: $ct -> $newtype"
     echo "    cordon + drain"
-    oc adm cordon "$nm" >/dev/null 2>&1 || true
-    oc adm drain "$nm" --ignore-daemonsets --delete-emptydir-data --force --timeout=300s >/dev/null 2>&1 \
-      || echo "    (drain reported issues — continuing; static control-plane pods are expected to remain)"
+    drain_node "$nm" || return 1
+    if [ "$is_master" = 1 ]; then
+      _wait_etcd_healthy "$masters_total" 420 \
+        || { echo "etcd is not healthy; refusing to power off a master" >&2; return 1; }
+    fi
 
     echo "    powering off"
     _wait_action "$(_hc POST "/servers/$id/actions/poweroff" | jq -r '.action.id')" 180 || true
@@ -221,12 +226,12 @@ EOF
     _wait_srv_status "$id" running 180 || true
 
     echo "    waiting for $nm to rejoin as Ready"
-    _wait_node_ready "$nm" 420 || echo "    WARNING: $nm not Ready yet — check: oc get nodes / oc get csr"
+    _wait_node_ready "$nm" 420 || { echo "$nm is not Ready; stopping rolling resize" >&2; return 1; }
     oc adm uncordon "$nm" >/dev/null 2>&1 || true
 
     if [ "$is_master" = 1 ]; then
       echo "    waiting for etcd to be healthy before the next master"
-      _wait_etcd_healthy "$masters_total" 420 || echo "    WARNING: etcd not confirmed healthy — verify before continuing: oc get etcd / oc -n openshift-etcd get pods"
+      _wait_etcd_healthy "$masters_total" 420 || { echo "etcd not healthy; stopping rolling resize" >&2; return 1; }
     fi
     echo "    $nm is now $newtype and Ready"
   done <<EOF

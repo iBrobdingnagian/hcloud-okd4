@@ -13,9 +13,11 @@ platform. It's the map; the other docs are the detail:
 - [AFFINITY.md](AFFINITY.md) — scheduling: affinity/anti-affinity + draining nodes
 
 Everything is driven by **`deploy-okd.sh`**, which sources one file per concern from
-`functions/*.sh`. The DevOps tools and app simulations are **opt-in, failure-isolated**
-(each `install_*` runs under `|| true` and self-bootstraps its prerequisites), so one
-component failing never blocks the rest.
+`functions/*.sh`. Named-cluster commands first enter a separate working directory
+under a per-cluster operation lock; see [MULTICLUSTER.md](MULTICLUSTER.md).
+DevOps tools and app simulations are opt-in and attempt their prerequisites.
+The dispatcher continues with other selected components after an installer-reported
+failure, then returns a failing exit status for the requested installation.
 
 ---
 
@@ -194,8 +196,9 @@ it secure, and the **application simulations** prove it all works together.
 
 ## Design conventions (true across all components)
 
-- **Opt-in & failure-isolated** — every `install_*` is best-effort (`|| true`) and
-  self-bootstraps prerequisites, so partial installs are fine and safe to re-run.
+- **Opt-in components** — installers attempt prerequisites and allow reruns.
+  Installer-reported failures are collected by the dispatcher and fail a requested
+  installation after the remaining selected components have been attempted.
 - **Idempotent** — re-running the deploy or any installer converges, doesn't duplicate.
 - **N-2 version policy** — operators/charts pin two releases behind head for stability
   (`VERSION_POLICY=latest` to opt out).

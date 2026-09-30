@@ -2,12 +2,30 @@ variable "replicas_master" {
   type        = number
   default     = 1
   description = "Count of master replicas"
+  validation {
+    condition     = contains([1, 3, 5], var.replicas_master)
+    error_message = "Master replicas must be 1, 3, or 5."
+  }
 }
 
 variable "replicas_worker" {
   type        = number
   default     = 0
   description = "Count of worker replicas"
+  validation {
+    condition     = var.replicas_worker >= 0 && floor(var.replicas_worker) == var.replicas_worker
+    error_message = "Worker replicas must be a nonnegative integer."
+  }
+}
+
+variable "cluster_id" {
+  type        = string
+  default     = ""
+  description = "Stable ownership ID for named clusters; empty preserves legacy ownership."
+  validation {
+    condition     = var.cluster_id == "" || can(regex("^[a-z][a-z0-9-]{0,30}$", var.cluster_id))
+    error_message = "cluster_id must be a lowercase name of at most 31 characters."
+  }
 }
 
 variable "bootstrap" {

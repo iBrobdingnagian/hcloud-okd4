@@ -3,6 +3,11 @@ variable "name" {
   description = "Instance nam"
 }
 
+variable "labels" {
+  type    = map(string)
+  default = {}
+}
+
 variable "dns_domain" {
   type        = string
   description = "DNS domain"

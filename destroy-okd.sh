@@ -2,26 +2,37 @@
 #
 # destroy-okd.sh — tear down the OKD cluster on Hetzner
 # Destroys all terraform-managed resources (servers, LB, network,
-# firewalls, DNS records). Optionally deletes the CoreOS snapshot and
-# the local install state.
+# firewalls, DNS records). Retains shared CoreOS snapshots and optionally
+# removes the local install artifacts after backing up credentials.
 #
 set -euo pipefail
-cd "$(dirname "$0")"
+REPO_ROOT=$(cd "$(dirname "$0")" && pwd)
+. "$REPO_ROOT/functions/context.sh"
+cluster_dispatch destroy "$@"
+. "$REPO_ROOT/functions/lifecycle.sh"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 err() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 ASSUME_YES=0
-case "${1:-}" in
-  --yes) ASSUME_YES=1 ;;
-  "") ;;
-  *) err "unknown option: $1 (only --yes is supported)" ;;
-esac
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --yes) ASSUME_YES=1; shift ;;
+    -h|--help) echo 'Usage: ./destroy-okd.sh [--cluster NAME] [--yes]'; exit 0 ;;
+    *) err "unknown option: $1" ;;
+  esac
+done
+load_env
+DOMAIN=${TF_VAR_dns_domain:?TF_VAR_dns_domain is required}
+export KUBECONFIG="$PWD/ignition/auth/kubeconfig"
+[ -s terraform/terraform.tfstate ] || err "local Terraform state is missing; refusing teardown"
+python3 "$REPO_ROOT/scripts/check_state.py" terraform/terraform.tfstate "$DOMAIN" "${CLUSTER_ID:-}"
+cluster_servers >/dev/null || err "could not verify live cluster ownership"
 
 # A manual run cancels a pending auto-destroy job. The scheduled run itself
 # (HCLOUD_OKD4_SCHEDULED=1, set in the launchd plist) must NOT do this —
 # bootout would SIGTERM the job's own process tree mid-destroy.
-LABEL=com.hcloud-okd4.autodestroy
+LABEL=com.hcloud-okd4.autodestroy.${AUTODESTROY_ID}
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 if [ "$(uname)" = "Darwin" ] && [ -z "${HCLOUD_OKD4_SCHEDULED:-}" ]; then
   if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
@@ -31,7 +42,7 @@ if [ "$(uname)" = "Darwin" ] && [ -z "${HCLOUD_OKD4_SCHEDULED:-}" ]; then
   rm -f "$PLIST"
 fi
 
-UNIT=hcloud-okd4-autodestroy
+UNIT=hcloud-okd4-autodestroy-${AUTODESTROY_ID}
 if [ "$(uname)" = "Linux" ] && [ -z "${HCLOUD_OKD4_SCHEDULED:-}" ]; then
   if systemctl --user list-units --all "$UNIT.*" 2>/dev/null | grep -q "$UNIT"; then
     log "Cancelling pending auto-destroy timer"
@@ -46,7 +57,7 @@ if [ "$(uname)" = "Linux" ] && [ -z "${HCLOUD_OKD4_SCHEDULED:-}" ]; then
 fi
 
 [ -f .env ] || err ".env not found"
-export $(grep -v '^#' .env | xargs)
+load_env
 TOOLBOX=quay.io/slauger/hcloud-okd4:${OPENSHIFT_RELEASE:?OPENSHIFT_RELEASE missing from .env}
 
 # a scheduled run cannot assume Docker Desktop is up
@@ -86,30 +97,32 @@ fi
 # Hetzner API, so `terraform destroy` neither knows nor removes them — and
 # while they stay attached to the cluster network/firewall they BLOCK terraform
 # from deleting those. Remove them first, scoped to this cluster: servers
-# carrying the autoscaler's 'hcloud/node-group' label that are attached to the
-# cluster network (falling back to the 'worker-asc-/autoscaled-' name prefix if
-# the network is already gone).
+# carrying this cluster's unique node-pool label, or (legacy only) attached
+# to its verified network. A missing network never broadens the selection.
 log "Removing cluster-autoscaler nodes (not managed by terraform)"
-CA_NETID=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
-  "https://api.hetzner.cloud/v1/networks?name=$TF_VAR_dns_domain" 2>/dev/null | jq -r '.networks[0].id // empty' || true)
-ca_node_ids() {
-  curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" "https://api.hetzner.cloud/v1/servers?per_page=100" 2>/dev/null \
-    | jq -r --arg net "${CA_NETID:-}" '
-        .servers[]
-        | select(.labels["hcloud/node-group"] != null)
-        | select( ($net != "" and ([.private_net[].network | tostring] | index($net)))
-                  or ($net == "" and (.name | test("^(worker-asc|autoscaled)-"))) )
-        | "\(.id) \(.name)"' 2>/dev/null || true
-}
+CA_NETID=$(hcloud_list networks | jq -r --arg d "$DOMAIN" '.networks[] | select(.name == $d) | .id')
 CA_NODES=$(ca_node_ids)
+if [ -f .cluster-autoscaler-installed ] || [ -n "$CA_NODES" ]; then
+  assert_cluster_context || err "cannot verify autoscaler cluster context"
+  CA_DEPLOYMENT=$(oc -n cluster-autoscaler get deployment cluster-autoscaler --ignore-not-found -o name) \
+    || err "could not inspect the autoscaler before teardown"
+  if [ -n "$CA_DEPLOYMENT" ]; then
+    oc -n cluster-autoscaler scale deployment/cluster-autoscaler --replicas=0 \
+      || err "could not stop the autoscaler before deleting its servers"
+    oc -n cluster-autoscaler wait --for=delete pod -l app=cluster-autoscaler --timeout=120s \
+      || err "autoscaler pods did not stop"
+  fi
+fi
 if [ -n "$CA_NODES" ]; then
   echo "$CA_NODES" | while read -r id name; do
     [ -n "$id" ] || continue
-    curl -s -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
-      "https://api.hetzner.cloud/v1/servers/$id" >/dev/null && echo "  deleted autoscaled node ${name:-$id}"
+    curl -fsS --max-time 60 -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
+      "https://api.hetzner.cloud/v1/servers/$id" >/dev/null || exit 1
+    echo "  deleted autoscaled node ${name:-$id}"
   done
   printf '    waiting for them to be removed'
-  for _ in $(seq 1 30); do [ -z "$(ca_node_ids)" ] && break; printf '.'; sleep 2; done
+  for _ in $(seq 1 30); do CA_NODES=$(ca_node_ids); [ -z "$CA_NODES" ] && break; printf '.'; sleep 2; done
+  [ -z "$CA_NODES" ] || err "autoscaled servers still exist; teardown stopped"
   echo " done"
 else
   echo "  none found"
@@ -123,25 +136,8 @@ docker run --rm --dns 1.1.1.1 --env-file .env \
   -v "$PWD":/workspace -w /workspace "$TOOLBOX" \
   bash -c "make destroy; rc=\$?; chown -R $(id -u):$(id -g) /workspace; exit \$rc"
 
-# ── CoreOS snapshot (terraform does not manage it) ───────────────────────
-if [ "$ASSUME_YES" = 0 ]; then
-SNAPSHOTS=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
-  "https://api.hetzner.cloud/v1/images?type=snapshot" \
-  | jq -r '.images[] | select(.description|startswith("fcos")) | "\(.id) \(.description)"')
-if [ -n "$SNAPSHOTS" ]; then
-  echo
-  echo "CoreOS snapshots in the Hetzner project (small storage fee):"
-  echo "$SNAPSHOTS" | sed 's/^/  /'
-  printf 'Delete them? [y/N]: '
-  read -r DELSNAP
-  if [ "$DELSNAP" = "y" ] || [ "$DELSNAP" = "Y" ]; then
-    echo "$SNAPSHOTS" | while read -r id _; do
-      curl -s -X DELETE -H "Authorization: Bearer $HCLOUD_TOKEN" \
-        "https://api.hetzner.cloud/v1/images/$id" >/dev/null && echo "  deleted $id"
-    done
-  fi
-fi
-fi
+# CoreOS images may be shared by multiple clusters. Retain them on teardown.
+log "Keeping shared CoreOS snapshots (manage them separately in Hetzner)"
 
 # ── local install state ──────────────────────────────────────────────────
 if [ "$ASSUME_YES" = 0 ] && { [ -d ignition ] || [ -d config ]; }; then

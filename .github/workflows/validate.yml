@@ -1,0 +1,35 @@
+name: Validate deployment
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.15.6'
+          terraform_wrapper: false
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Offline lifecycle regression tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Shell validation
+        run: |
+          shellcheck --severity=error *.sh functions/*.sh
+          shellcheck --severity=warning functions/context.sh functions/lifecycle.sh
+      - name: Terraform validation (no backend or cloud credentials)
+        run: |
+          terraform fmt -check -recursive terraform
+          terraform -chdir=terraform init -backend=false -input=false -lockfile=readonly
+          terraform -chdir=terraform validate
+      - name: Render and validate node ignition templates
+        run: python tests/check_terraform_templates.py

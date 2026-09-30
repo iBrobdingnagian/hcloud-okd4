@@ -23,3 +23,13 @@ autodestroy.log
 logs/
 # session/run logs — may contain the kubeadmin password and other secrets
 *.log
+pull-secret.json
+
+# Cluster-specific generated state and credentials
+.work/
+.secrets/
+.phases/
+.cluster-autoscaler-installed
+!terraform/.terraform.lock.hcl
+__pycache__/
+*.py[cod]

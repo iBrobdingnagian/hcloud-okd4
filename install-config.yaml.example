@@ -11,7 +11,7 @@ controlPlane:
 metadata:
   name: okd4
 networking:
-  clusterNetworks:
+  clusterNetwork:
   - cidr: 10.128.0.0/14
     hostPrefix: 23
   networkType: OVNKubernetes
@@ -20,4 +20,4 @@ networking:
 platform:
   none: {}
 pullSecret: '{"auths":{"none":{"auth":"none"}}}'
-sshKeys:
+sshKey: ""

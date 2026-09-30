@@ -14,9 +14,10 @@ handle_existing_cluster() {
   # stale number — including control-plane nodes. Count the real servers and
   # reconcile before doing anything.
   local real_m real_w srv_json
-  srv_json=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" "https://api.hetzner.cloud/v1/servers")
-  real_m=$(echo "$srv_json" | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | test("^master[0-9]+\\." + $d))] | length')
-  real_w=$(echo "$srv_json" | jq -r --arg d "$DOMAIN" '[.servers[] | select(.name | test("^worker[0-9]+\\." + $d))] | length')
+  assert_cluster_context || err "cluster context mismatch"
+  srv_json=$(cluster_servers) || err "could not discover cluster servers"
+  real_m=$(echo "$srv_json" | jq -r --arg d "$DOMAIN" '[.servers[] | select((.name | endswith("." + $d)) and (.name | split(".")[0] | test("^master[0-9]+$")))] | length')
+  real_w=$(echo "$srv_json" | jq -r --arg d "$DOMAIN" '[.servers[] | select((.name | endswith("." + $d)) and (.name | split(".")[0] | test("^worker[0-9]+$")))] | length')
   if [ "${real_m:-0}" != "$CUR_MASTERS" ] || [ "${real_w:-0}" != "$CUR_WORKERS" ]; then
     log "NOTE: .env says $CUR_MASTERS master(s)/$CUR_WORKERS worker(s) but Hetzner actually has $real_m master(s)/$real_w worker(s) — using the live counts"
     CUR_MASTERS=$real_m
@@ -109,6 +110,7 @@ handle_existing_cluster() {
   case "$NEW_MASTERS$NEW_WORKERS" in *[!0-9]*) err "counts must be numbers";; esac
   [ "$NEW_WORKERS" -ge 0 ] || err "worker count cannot be negative"
   [ "$NEW_MASTERS" -ge 1 ] || err "at least 1 master required"
+  case "$NEW_MASTERS" in 1|3|5) ;; *) err "master count must be 1, 3, or 5" ;; esac
   if [ "$NEW_MASTERS" = "$CUR_MASTERS" ] && [ "$NEW_WORKERS" = "$CUR_WORKERS" ]; then
     err "nothing to do: master/worker counts unchanged ($CUR_MASTERS/$CUR_WORKERS)"
   fi
@@ -165,7 +167,11 @@ MDOWNWARN
 # count became Ready, 1 otherwise.
 apply_scale() {
   export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+  assert_cluster_context || return 1
   TOOLBOX=quay.io/slauger/hcloud-okd4:$OPENSHIFT_RELEASE
+  if [ "$NEW_MASTERS" -ne "$CUR_MASTERS" ]; then
+    _wait_etcd_healthy "$CUR_MASTERS" 420 || { echo "etcd is not healthy; stopping scale" >&2; return 1; }
+  fi
 
   log "Toolbox image"
   if docker image inspect "$TOOLBOX" >/dev/null 2>&1; then
@@ -181,44 +187,54 @@ apply_scale() {
     for i in $(seq $((NEW_WORKERS + 1)) "$CUR_WORKERS"); do
       NODE=$(printf 'worker%02d.%s' "$i" "$DOMAIN")
       echo "    draining $NODE"
-      oc adm cordon "$NODE" 2>/dev/null || true
-      oc adm drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force --timeout=180s 2>/dev/null || true
-      oc delete node "$NODE" 2>/dev/null || true
+      drain_node "$NODE" || return 1
     done
   fi
   if [ "$NEW_MASTERS" -lt "$CUR_MASTERS" ]; then
     log "Removing $((CUR_MASTERS - NEW_MASTERS)) master node(s) from etcd before removal"
     # any remaining etcd pod can run etcdctl against the whole cluster
-    ETCD_POD=$(oc -n openshift-etcd get pods -l app=etcd -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-    [ -n "$ETCD_POD" ] || echo "    WARNING: could not find an etcd pod — skipping etcdctl member removal"
-    for i in $(seq $((NEW_MASTERS + 1)) "$CUR_MASTERS"); do
+    ETCD_POD=$(oc -n openshift-etcd get pods -l app=etcd -o json | jq -r --arg n "master01.$DOMAIN" \
+      '.items[] | select(.spec.nodeName == $n) | .metadata.name' | head -1) || return 1
+    [ -n "$ETCD_POD" ] || { echo "No surviving etcd pod found; stopping scale-down" >&2; return 1; }
+    etcd_endpoints_healthy "$ETCD_POD" || return 1
+    for i in $(seq "$CUR_MASTERS" -1 $((NEW_MASTERS + 1))); do
       NODE=$(printf 'master%02d.%s' "$i" "$DOMAIN")
       SHORT=$(printf 'master%02d' "$i")
       echo "    draining $NODE"
-      oc adm cordon "$NODE" 2>/dev/null || true
-      oc adm drain "$NODE" --ignore-daemonsets --delete-emptydir-data --force --timeout=180s 2>/dev/null || true
+      drain_node "$NODE" || return 1
       if [ -n "$ETCD_POD" ]; then
-        MEMBER_ID=$(oc -n openshift-etcd exec "$ETCD_POD" -c etcdctl -- etcdctl member list -w simple 2>/dev/null \
-          | awk -F, -v n="$SHORT" '$3 ~ n {print $1}')
+        # Keep IDs as strings: jq would round etcd's 64-bit numeric JSON IDs.
+        MEMBER_ID=$(oc -n openshift-etcd exec "$ETCD_POD" -c etcdctl -- etcdctl member list -w simple \
+          | awk -F', ' -v n="$SHORT" -v fqdn="$NODE" '$3 == n || $3 == fqdn {print $1}') || return 1
         if [ -n "$MEMBER_ID" ]; then
           echo "    removing etcd member $MEMBER_ID ($SHORT)"
-          oc -n openshift-etcd exec "$ETCD_POD" -c etcdctl -- etcdctl member remove "$MEMBER_ID" 2>/dev/null \
-            || echo "    WARNING: etcdctl member remove failed for $SHORT — check etcd health manually"
+          oc -n openshift-etcd exec "$ETCD_POD" -c etcdctl -- etcdctl member remove "$MEMBER_ID" \
+            || { echo "etcd member removal failed; no VMs will be deleted" >&2; return 1; }
+          etcd_endpoints_healthy "$ETCD_POD" || return 1
         else
-          echo "    WARNING: no etcd member found matching $SHORT — skipping"
+          echo "No exact etcd member found for $SHORT; stopping" >&2
+          return 1
         fi
       fi
-      oc delete node "$NODE" 2>/dev/null || true
     done
   fi
 
   sedi -E \
     -e "s|^TF_VAR_replicas_master=.*|TF_VAR_replicas_master=$NEW_MASTERS|" \
     -e "s|^TF_VAR_replicas_worker=.*|TF_VAR_replicas_worker=$NEW_WORKERS|" .env
-  export $(grep -v '^#' .env | xargs)
+  load_env
 
   log "Applying infrastructure changes (terraform): $CUR_MASTERS -> $NEW_MASTERS master(s), $CUR_WORKERS -> $NEW_WORKERS worker(s)"
-  tb "make infrastructure"
+  tb "make infrastructure" || return 1
+  for role in worker master; do
+    if [ "$role" = worker ]; then old=$CUR_WORKERS; new=$NEW_WORKERS
+    else old=$CUR_MASTERS; new=$NEW_MASTERS; fi
+    if [ "$new" -lt "$old" ]; then
+      for i in $(seq $((new + 1)) "$old"); do
+        oc delete node "$(printf '%s%02d.%s' "$role" "$i" "$DOMAIN")" --ignore-not-found || return 1
+      done
+    fi
+  done
   flush_dns
 
   EXPECTED=$((NEW_MASTERS + NEW_WORKERS))
@@ -240,6 +256,7 @@ apply_scale() {
     echo "    WARNING: node count is ${READY:-0}, expected $EXPECTED — check: oc get nodes / oc get csr"
   fi
   if [ "$NEW_MASTERS" -ne "$CUR_MASTERS" ]; then
+    _wait_etcd_healthy "$NEW_MASTERS" 420 || { echo "etcd has not recovered after scaling" >&2; return 1; }
     echo
     echo "    verify etcd membership:"
     echo "      oc get etcd -o jsonpath='{.status.conditions}'"

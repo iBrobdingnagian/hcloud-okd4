@@ -1,7 +1,7 @@
 {
   "ignition": {
     "config": {
-      %{ if ignition_version == "3.0.0" }"merge": [%{ else }"append": [%{ endif }
+      "merge": [
         {
           "source": "${ignition_url}"%{ if ignition_cacert == "" },
           "verification": {}%{ endif }
@@ -20,12 +20,10 @@
     "timeouts": {},
     "version": "${ignition_version}"
   },
-  "networkd": {},
   "passwd": {},
   "storage": {
     "files": [
       {
-        "filesystem": "root",
         "group": {},
         "path": "/etc/hostname",
         "user": {},
@@ -34,13 +32,8 @@
           "verification": {}
         },
         "mode": 420
-      }
-    ]
-  },
-  "storage": {
-    "files": [
+      },
       {
-        "filesystem": "root",
         "group": {},
         "overwrite": true,
         "path": "/etc/resolv.conf",

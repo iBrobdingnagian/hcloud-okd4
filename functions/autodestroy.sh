@@ -3,6 +3,15 @@
 # Sourced by deploy-okd.sh; not meant to be executed directly.
 
 schedule_autodestroy() {
+AUTODESTROY_NOTE="automatic teardown disabled"
+[ "$NO_AUTODESTROY" = 0 ] || return 0
+local -a destroy_command=(env -u HCLOUD_OKD4_CONTEXT_DIR -u CLUSTER_ID HCLOUD_OKD4_SCHEDULED=1 bash "$REPO_ROOT/destroy-okd.sh")
+[ -z "${CLUSTER_ID:-}" ] || destroy_command+=(--cluster "$CLUSTER_ID")
+destroy_command+=(--yes)
+local scheduled_command log_path
+printf -v scheduled_command '%q ' "${destroy_command[@]}"
+printf -v log_path '%q' "$PWD/logs/autodestroy.log"
+scheduled_command="$scheduled_command >> $log_path 2>&1"
 AD_DUR=${FLAG_AUTODESTROY_AT:-$DUR}
 case "$AD_DUR" in
   *m) AD_HOURS=$(awk -v m="${AD_DUR%m}" 'BEGIN{printf "%.4f", m/60}') ;;
@@ -23,7 +32,7 @@ if [ "$(uname)" = "Darwin" ] && [ "$NO_AUTODESTROY" = 0 ]; then
     read -r SCHED; SCHED=${SCHED:-y}
   fi
   if [ "$SCHED" = "y" ] || [ "$SCHED" = "Y" ]; then
-    LABEL=com.hcloud-okd4.autodestroy
+    LABEL=com.hcloud-okd4.autodestroy.${AUTODESTROY_ID}
     PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
     UID_N=$(id -u)
     launchctl bootout "gui/$UID_N/$LABEL" 2>/dev/null || true
@@ -34,26 +43,14 @@ if [ "$(uname)" = "Darwin" ] && [ "$NO_AUTODESTROY" = 0 ]; then
     D_MIN=$((10#$(date -r "$DEADLINE_TS" +%M)))
     # the job boots itself out LAST (bootout SIGTERMs the job's own shell);
     # destroy-okd.sh skips its cancel logic when HCLOUD_OKD4_SCHEDULED=1
-    cat > "$PLIST" <<PLISTEOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>EnvironmentVariables</key><dict>
-    <key>HCLOUD_OKD4_SCHEDULED</key><string>1</string>
-  </dict>
-  <key>ProgramArguments</key><array>
-    <string>/bin/bash</string><string>-c</string>
-    <string>cd $PWD &amp;&amp; ./destroy-okd.sh --yes &gt;&gt; autodestroy.log 2&gt;&amp;1; rm -f $PLIST; launchctl bootout gui/$UID_N/$LABEL</string>
-  </array>
-  <key>StartCalendarInterval</key><dict>
-    <key>Month</key><integer>$D_MON</integer>
-    <key>Day</key><integer>$D_DAY</integer>
-    <key>Hour</key><integer>$D_HR</integer>
-    <key>Minute</key><integer>$D_MIN</integer>
-  </dict>
-</dict></plist>
-PLISTEOF
+    python3 - "$PLIST" "$LABEL" "$scheduled_command" "$D_MON" "$D_DAY" "$D_HR" "$D_MIN" "$UID_N" <<'PYPLIST'
+import plistlib, shlex, sys
+path, label, command, month, day, hour, minute, uid = sys.argv[1:]
+command += "; result=$?; rm -f " + shlex.quote(path) + "; launchctl bootout " + shlex.quote("gui/" + uid + "/" + label) + "; exit $result"
+with open(path, 'wb') as stream:
+    plistlib.dump({'Label': label, 'ProgramArguments': ['/bin/bash', '-c', command],
+                  'StartCalendarInterval': dict(Month=int(month), Day=int(day), Hour=int(hour), Minute=int(minute))}, stream)
+PYPLIST
     if launchctl bootstrap "gui/$UID_N" "$PLIST" 2>/dev/null; then
       AUTODESTROY_NOTE="auto-destroy : scheduled for $DEADLINE_HUMAN (fires on next wake if the Mac slept past it)
   cancel with : launchctl bootout gui/$UID_N/$LABEL   (a manual ./destroy-okd.sh also cancels it)"
@@ -69,22 +66,25 @@ elif [ "$(uname)" = "Linux" ] && [ "$NO_AUTODESTROY" = 0 ]; then
     read -r SCHED; SCHED=${SCHED:-y}
   fi
   if [ "$SCHED" = "y" ] || [ "$SCHED" = "Y" ]; then
-    UNIT=hcloud-okd4-autodestroy
+    UNIT=hcloud-okd4-autodestroy-${AUTODESTROY_ID}
     AD_SECONDS=$(( DEADLINE_TS - $(date +%s) ))
     [ "$AD_SECONDS" -gt 0 ] || AD_SECONDS=60
     # cancel any previous timer for this checkout first
     systemctl --user stop "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1 || true
     systemctl --user reset-failed "$UNIT.timer" "$UNIT.service" >/dev/null 2>&1 || true
-    rm -f .autodestroy-atjob
+    if [ -f .autodestroy-atjob ]; then
+      atrm "$(cat .autodestroy-atjob)" || return 1
+      rm -f .autodestroy-atjob
+    fi
     if command -v systemd-run >/dev/null 2>&1 && systemd-run --user \
         --unit="$UNIT" \
         --on-active="${AD_SECONDS}s" \
-        bash -c "cd $PWD && HCLOUD_OKD4_SCHEDULED=1 ./destroy-okd.sh --yes >> autodestroy.log 2>&1" >/dev/null 2>&1; then
+        bash -c "$scheduled_command" >/dev/null 2>&1; then
       AUTODESTROY_NOTE="auto-destroy : scheduled for $DEADLINE_HUMAN via systemd --user timer ($UNIT.timer)
   cancel with : systemctl --user stop $UNIT.timer $UNIT.service   (a manual ./destroy-okd.sh also cancels it)
   NOTE: --user timers only fire while you are logged in, unless lingering is
   enabled (sudo loginctl enable-linger \$USER)."
-    elif command -v at >/dev/null 2>&1 && AT_OUT=$(printf 'cd %s && HCLOUD_OKD4_SCHEDULED=1 ./destroy-okd.sh --yes >> autodestroy.log 2>&1\n' "$PWD" \
+    elif command -v at >/dev/null 2>&1 && AT_OUT=$(printf '%s\n' "$scheduled_command" \
         | at -M "now + $(( (AD_SECONDS + 59) / 60 )) minutes" 2>&1); then
       AT_JOB=$(echo "$AT_OUT" | grep -oE 'job [0-9]+' | awk '{print $2}')
       [ -n "$AT_JOB" ] && echo "$AT_JOB" > .autodestroy-atjob

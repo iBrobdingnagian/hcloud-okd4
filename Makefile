@@ -1,4 +1,5 @@
 .DEFAULT_GOAL := build
+SHELL := /bin/bash
 
 # ocp
 OPENSHIFT_MIRROR?=https://mirror.openshift.com/pub/openshift-v4
@@ -126,7 +127,7 @@ infrastructure:
 	@if [ -z "$(TF_VAR_dns_domain)" ]; then echo "ERROR: TF_VAR_dns_domain is not set"; exit 1; fi
 	@if [ -z "$(TF_VAR_dns_zone_id)" ]; then echo "ERROR: TF_VAR_dns_zone_id is not set"; exit 1; fi
 	@if [ -z "$(HCLOUD_TOKEN)" ]; then echo "ERROR: HCLOUD_TOKEN is not set"; exit 1; fi
-	@if [ -z "$(CLOUDFLARE_EMAIL)" ]; then echo "ERROR: CLOUDFLARE_EMAIL is not set"; exit 1; fi
+	@if [ -z "$(CLOUDFLARE_API_TOKEN)" ]; then echo "ERROR: CLOUDFLARE_API_TOKEN is not set"; exit 1; fi
 	(cd terraform && terraform init && \
 	 case "$(MODE)" in \
 	   apply*) \

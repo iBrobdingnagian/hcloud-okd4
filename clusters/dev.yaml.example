@@ -1,0 +1,24 @@
+# Copy to dev.yaml. Configuration is committed; credentials and .work/ are not.
+name: dev
+domain: dev.example.com
+zone_id: REPLACE_WITH_CLOUDFLARE_ZONE_ID
+release: 4.16.0-okd-scos.1  # Example only: choose a full release tag you have tested.
+region: nbg1
+network_zone: eu-central
+masters: 3
+workers: 3
+master_type: cpx41
+worker_type: cpx41
+ignition_type: cpx21
+credentials_file: .secrets/dev.env
+ssh_private_key: .secrets/dev_id_rsa  # Also provide dev_id_rsa.pub.
+# pull_secret_file: .secrets/dev-pull-secret.json
+duration: 8
+autodestroy: false
+network:
+  machine: 10.10.0.0/16
+  nodes: 10.10.1.0/24
+  load_balancer: 10.10.2.0/24
+  pods: 10.128.0.0/14
+  services: 172.30.0.0/16
+  host_prefix: 23

@@ -7,7 +7,10 @@
 # Called directly, or through the reboot-okd.sh / shutdown-okd.sh wrappers.
 #
 set -euo pipefail
-cd "$(dirname "$0")"
+REPO_ROOT=$(cd "$(dirname "$0")" && pwd)
+. "$REPO_ROOT/functions/context.sh"
+cluster_dispatch power "$@"
+. "$REPO_ROOT/functions/lifecycle.sh"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 err() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -23,6 +26,7 @@ Actions:
   status      list the cluster servers and their power state
 
 Options:
+  --cluster NAME  select clusters/NAME.yaml
   --role R    only servers of role R: master, worker, bootstrap,
               ignition, or all (default: all)
   --hard      skip the ACPI request; reset/poweroff at the hypervisor.
@@ -77,7 +81,7 @@ esac
 
 command -v jq >/dev/null || err "jq is required"
 [ -f .env ] || err ".env not found"
-export $(grep -v '^#' .env | xargs)
+load_env
 : "${HCLOUD_TOKEN:?HCLOUD_TOKEN missing from .env}"
 DOMAIN=${TF_VAR_dns_domain:?TF_VAR_dns_domain missing from .env}
 
@@ -87,14 +91,14 @@ _hc() {  # _hc <METHOD> <path>
 }
 
 # ── select the target servers ─────────────────────────────────────────────
-ALL_JSON=$(_hc GET "/servers?per_page=100")
+ALL_JSON=$(cluster_servers)
 echo "$ALL_JSON" | jq -e '.servers' >/dev/null 2>&1 \
   || err "Hetzner API error: $(echo "$ALL_JSON" | jq -r '.error.message // .' 2>/dev/null)"
 
 # name<TAB>id<TAB>status, cluster domain only, ordered workers -> masters so a
 # shutdown drains the compute nodes before the control plane goes away
-SERVERS=$(echo "$ALL_JSON" | jq -r --arg d ".$DOMAIN" '
-  .servers[] | select(.name | endswith($d))
+SERVERS=$(echo "$ALL_JSON" | jq -r '
+  .servers[]
   | [.name, (.id|tostring), .status] | @tsv' | sort)
 
 [ -n "$SERVERS" ] || err "no servers found in domain $DOMAIN"
@@ -122,8 +126,8 @@ esac
 # ── status is read-only, print and leave ──────────────────────────────────
 if [ "$ACTION" = status ]; then
   printf '%-40s %-12s %-10s %s\n' NAME STATE TYPE IPv4
-  echo "$ALL_JSON" | jq -r --arg d ".$DOMAIN" '
-    .servers[] | select(.name | endswith($d))
+  echo "$ALL_JSON" | jq -r '
+    .servers[]
     | [.name, .status, .server_type.name,
        (.public_net.ipv4.ip // "-")] | @tsv' | sort \
     | while IFS=$'\t' read -r n s t ip; do

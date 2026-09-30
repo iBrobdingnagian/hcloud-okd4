@@ -1,6 +1,7 @@
 resource "hcloud_network" "network" {
   name     = var.dns_domain
   ip_range = var.network_cidr
+  labels   = local.cluster_labels
 }
 
 resource "hcloud_network_subnet" "subnet" {

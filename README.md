@@ -21,6 +21,7 @@ This setup is suitable for small test environments only. Not recommended for pro
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — how everything fits together and what every
   component does (start here for the big picture).
 - [GETTING_STARTED.md](GETTING_STARTED.md) — first run.
+- [MULTICLUSTER.md](MULTICLUSTER.md) — separate cluster configurations, state, planning, and recovery.
 - [APPSIM.md](APPSIM.md) — the real-world application simulations (GitOps, CI/CD, Kafka, AWX).
 - [SCANNING.md](SCANNING.md) — image (Harbor/Trivy) + code (SonarQube) scanning.
 - [MESH.md](MESH.md) — service mesh & tracing UIs (Istio, Kiali, Jaeger) + the mesh showcase.
@@ -30,6 +31,12 @@ This setup is suitable for small test environments only. Not recommended for pro
 ---
 
 ## Automated Deploy / Destroy
+
+For multiple independent clusters, use `--cluster NAME` with `clusters/NAME.yaml`.
+Start with `clusters/dev.yaml.example`; see [MULTICLUSTER.md](MULTICLUSTER.md).
+`--plan` previews a named cluster, and `--resume` continues an interrupted installation
+without regenerating its credentials. Commands without `--cluster` retain the
+original single-cluster working directory.
 
 `deploy-okd.sh` and `destroy-okd.sh` wrap the whole Quick Start procedure below
 (plus the live region/pricing checks, CSR approval, and DNS-cache fixes
@@ -74,8 +81,8 @@ answer the prompts) to add or remove nodes on a live cluster.
 
 - **Workers**: scaling up runs `terraform apply` to create the new VM(s) and
   approves their CSRs until they're `Ready`. Scaling down cordons/drains the
-  highest-numbered worker(s), deletes their Node objects, then runs
-  `terraform apply` to destroy the VM(s).
+  highest-numbered worker(s), stops if a drain fails, then runs
+  `terraform apply` to destroy the VM(s) before deleting their Node objects.
 - **Masters**: supported the same way, but is **experimental** — etcd
   membership is not guaranteed to reconcile automatically on platform "none".
   Scaling down additionally removes the member via `etcdctl member remove`
@@ -277,7 +284,8 @@ operators the policy takes effect on a *fresh* install.
 
 Notes & caveats:
 - Each installer is **failure-isolated** — one failing doesn't abort the
-  others — and its URL/credentials are appended to the deploy summary.
+  others. Installer-reported failures produce a failing exit status after the
+  remaining requested components have been attempted.
 - **GitLab is experimental and heavy** (gitaly, postgres, redis, minio,
   webservice, sidekiq, its own nginx-ingress). It needs a storageclass, but
   `platform: none` ships none, so selecting GitLab first installs
