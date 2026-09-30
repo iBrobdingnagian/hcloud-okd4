@@ -10,6 +10,9 @@
 # Evict one old pod to unstick the rollout, and force-clean pods stuck
 # Terminating so they cannot hold the slot either.
 install_watchdog() {
+  # runs as a background subshell that inherits deploy-okd.sh's `set -e`;
+  # an oc call failing during an apiserver restart must not kill it
+  set +e
   while :; do
     oc get csr -o name 2>/dev/null | xargs -r oc adm certificate approve >/dev/null 2>&1 || true
     for ns in openshift-oauth-apiserver openshift-apiserver; do
