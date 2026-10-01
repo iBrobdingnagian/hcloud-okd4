@@ -42,6 +42,10 @@ pre { background: var(--code); border-radius: 8px; padding: 12px; margin: 0; ove
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
 .hint { color: var(--muted); font-size: 13px; }
 select { font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+.hrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 4px; }
+#hproblems { margin: 8px 0 0; padding-left: 20px; color: var(--bad); }
+#hproblems li { display: list-item; border: 0; padding: 2px 0; }
+.card h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 code { font-family: ui-monospace, monospace; font-size: 13px; }
 </style>
 </head>
@@ -55,6 +59,12 @@ code { font-family: ui-monospace, monospace; font-size: 13px; }
   <div class="meta" id="meta"></div>
   <div class="bar"><div id="bar" style="width:0"></div></div>
   <div id="err" class="card error" hidden></div>
+  <section class="card" id="healthcard" hidden>
+    <h2>Cluster health <span class="sub" id="hchecked"></span></h2>
+    <div class="hrow"><span id="hstate" class="badge"></span> <span id="hsummary"></span></div>
+    <div class="sub" id="hcounts"></div>
+    <ul id="hproblems"></ul>
+  </section>
   <section class="card">
     <h2>Phases</h2>
     <ol id="steps"></ol>
@@ -132,8 +142,12 @@ function render(s) {
   const pct = Math.round(100 * (done + (s.running ? 0.5 : 0)) / s.steps.length);
   $('bar').style.width = pct + '%';
 
+  renderHealth(s);
+  const h = s.health;
+  const sick = h && (h.state === 'degraded' || h.state === 'down');
   const [label, color] = s.running ? [`running · step ${curIdx + 1}/${s.steps.length}`, 'var(--run)']
     : failed ? ['failed', 'var(--bad)']
+    : done === s.steps.length && s.operation === 'deploy' && sick ? ['complete · cluster unhealthy', 'var(--bad)']
     : done === s.steps.length ? ['complete', 'var(--ok)'] : ['idle', 'var(--idle)'];
   $('state').textContent = label;
   $('state').style.background = color;
@@ -152,6 +166,31 @@ function render(s) {
     if (atBottom) pre.scrollTop = pre.scrollHeight;
   }
   clock();
+}
+
+const HEALTH = {
+  healthy: ['healthy', 'var(--ok)'], progressing: ['progressing', 'var(--run)'],
+  degraded: ['degraded', 'var(--bad)'], down: ['API down', 'var(--bad)'],
+  unknown: ['unknown', 'var(--idle)'], none: ['no cluster', 'var(--idle)'],
+};
+function renderHealth(s) {
+  const h = s.health;
+  $('healthcard').hidden = !h;
+  if (!h) return;
+  // while a deploy is still installing, an unreachable API or busy operators are expected
+  const installing = s.running && s.operation === 'deploy' && (h.state === 'down' || h.state === 'degraded');
+  const [label, color] = installing ? ['installing', 'var(--run)'] : (HEALTH[h.state] || HEALTH.unknown);
+  $('hstate').textContent = label;
+  $('hstate').style.background = color;
+  $('hsummary').textContent = h.summary + (h.detail ? ' — ' + h.detail : '');
+  $('hchecked').textContent = '· checked ' + new Date(h.checked).toLocaleTimeString() + ', every 30 s';
+  $('hcounts').textContent = h.nodes !== undefined
+    ? `nodes Ready ${h.nodes_ready}/${h.nodes} · operators available ${h.operators_ok}/${h.operators}`
+      + (h.progressing && h.progressing.length ? ` · progressing: ${h.progressing.join(', ')}` : '')
+    : '';
+  $('hproblems').replaceChildren(...(h.problems || []).map(p => {
+    const li = document.createElement('li'); li.textContent = p; return li;
+  }));
 }
 
 // live counters tick every second between the 5 s status polls

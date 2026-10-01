@@ -13,6 +13,11 @@ operated on most recently. Progress comes from, in order of preference:
 plus logs/last-operation.json for the outcome and, when the operator opted in,
 a console transcript (logs/deploy-console.log) with credential lines redacted.
 
+Live health: a background thread checks every cluster that has infrastructure
+and an installer kubeconfig every HEALTH_INTERVAL seconds, with the criteria of
+verify_cluster_health (functions/lifecycle.sh): API /readyz, every
+ClusterOperator Available and not Degraded/Progressing, and every node Ready.
+
 Started automatically by deploy-okd.sh / destroy-okd.sh (functions/progress.sh).
 Usage: scripts/progress_server.py [--port 8093] [--bind 0.0.0.0]
 """
@@ -20,6 +25,10 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
+import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +50,7 @@ OPERATIONS = {
         ('Removing bootstrap + ignition nodes', '1-2 min', 'bootstrap-removed'),
         ('Waiting for install completion', '5-25 min', 'installed'),
         ('Approving CSRs until all', '2-10 min', 'ready'),
+        ('Post-install', 'waits for your answers (admin user, monitoring, DevOps)', None),
     ],
     'destroy': [
         ('Verifying cluster ownership', '<1 min', None),
@@ -59,6 +69,7 @@ MARKERS = {
         ('make infrastructure BOOTSTRAP=true', 4), ('22623/healthz', 5),
         ('make wait_bootstrap', 6), ('make infrastructure', 7),
         ('make wait_completion', 8), ('certificate approve', 9), ('get csr', 9),
+        ('helm ', 10),
     ],
     'destroy': [('make destroy', 3)],
 }
@@ -73,6 +84,84 @@ SECRET_RE = re.compile(r'pass(word|wd)?|token|secret|api[_-]?key|private key|aut
 _BOOT = next(float(l.split()[1]) for l in open('/proc/stat') if l.startswith('btime'))
 _TICK = os.sysconf('SC_CLK_TCK')
 _seen = {}  # run pid -> {'index', 'since'}: keeps the inferred step between commands
+
+
+HEALTH_INTERVAL = 30
+_health = {}  # workspace name -> latest health result
+_health_lock = threading.Lock()
+
+
+def has_infrastructure(work):
+    state = read_json(work / 'terraform' / 'terraform.tfstate')
+    return bool(state and state.get('resources'))
+
+
+def _oc(kubeconfig, *args):
+    env = dict(os.environ, KUBECONFIG=str(kubeconfig))
+    r = subprocess.run(['oc', '--request-timeout=10s', *args], env=env,
+                       capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1:] or ['oc failed'])
+    return r.stdout
+
+
+def _cond(item, kind):
+    return next((c.get('status') for c in item.get('status', {}).get('conditions', [])
+                 if c.get('type') == kind), None)
+
+
+def check_health(work):
+    kubeconfig = work / 'ignition' / 'auth' / 'kubeconfig'
+    result = {'checked': datetime.now(timezone.utc).isoformat()}
+    if not has_infrastructure(work):
+        return dict(result, state='none', summary='no cluster infrastructure')
+    if not kubeconfig.is_file():
+        return dict(result, state='none', summary='no installer kubeconfig yet')
+    if not shutil.which('oc'):
+        return dict(result, state='unknown', summary='oc not installed on this host')
+    try:
+        _oc(kubeconfig, 'get', '--raw=/readyz')
+    except Exception as e:  # noqa: BLE001 — any failure means the API is not ready
+        return dict(result, state='down', summary='API not ready', detail=str(e)[:300])
+    problems, progressing = [], []
+    try:
+        cos = json.loads(_oc(kubeconfig, 'get', 'clusteroperators', '-o', 'json'))['items']
+        for co in cos:
+            name = co['metadata']['name']
+            if _cond(co, 'Available') != 'True':
+                problems.append(f'operator {name} unavailable')
+            elif _cond(co, 'Degraded') == 'True':
+                problems.append(f'operator {name} degraded')
+            elif _cond(co, 'Progressing') == 'True':
+                progressing.append(name)
+        nodes = json.loads(_oc(kubeconfig, 'get', 'nodes', '-o', 'json'))['items']
+        not_ready = [n['metadata']['name'] for n in nodes if _cond(n, 'Ready') != 'True']
+        problems += [f'node {n} not ready' for n in not_ready]
+    except Exception as e:  # noqa: BLE001
+        return dict(result, state='down', summary='API answered but queries failed', detail=str(e)[:300])
+    result.update(operators=len(cos), operators_ok=len(cos) - len([p for p in problems if p.startswith('operator')]),
+                  nodes=len(nodes), nodes_ready=len(nodes) - len(not_ready),
+                  problems=problems, progressing=progressing)
+    if problems or not cos:
+        result.update(state='degraded', summary=f'{len(problems)} problem(s)' if problems else 'no cluster operators yet')
+    elif progressing:
+        result.update(state='progressing', summary=f'{len(progressing)} operator(s) still progressing')
+    else:
+        result.update(state='healthy', summary='API ready, all operators available, all nodes Ready')
+    return result
+
+
+def health_loop():
+    while True:
+        for name, work in workspaces().items():
+            try:
+                h = check_health(work)
+            except Exception as e:  # noqa: BLE001 — keep the monitor alive
+                h = {'state': 'unknown', 'summary': 'health check error', 'detail': str(e)[:300],
+                     'checked': datetime.now(timezone.utc).isoformat()}
+            with _health_lock:
+                _health[name] = h
+        time.sleep(HEALTH_INTERVAL)
 
 
 def iso(ts):
@@ -181,8 +270,10 @@ def status(name, work, procs):
         if found and (not prev or found[0] > prev['index']):
             _seen[pid] = {'index': found[0], 'since': found[1]}
         if pid not in _seen:
-            # 3) fallback: the first step whose checkpoint is missing
-            idx = next((i for i, s in enumerate(steps) if s[2] and s[2] not in done_cps), 0)
+            # 3) fallback: the first step whose checkpoint is missing; a deploy with
+            #    every checkpoint is in its post-install questions/add-ons
+            idx = next((i for i, s in enumerate(steps) if s[2] and s[2] not in done_cps),
+                       len(steps) - 1 if op == 'deploy' else 0)
             _seen[pid] = {'index': idx, 'since': None}
         cur = _seen[pid]
         current = {'index': cur['index'], 'title': steps[cur['index']][0],
@@ -204,6 +295,7 @@ def status(name, work, procs):
         'step_checkpoint': [s[2] for s in steps],
         'checkpoints': checkpoints,
         'last_operation': last,
+        'health': _health.get(name),
         'console': read_console(work / 'logs' / 'deploy-console.log') if op == 'deploy' else None,
     }
 
@@ -254,6 +346,7 @@ def main():
     ap.add_argument('--port', type=int, default=8093)
     ap.add_argument('--bind', default='0.0.0.0')
     a = ap.parse_args()
+    threading.Thread(target=health_loop, daemon=True).start()
     srv = ThreadingHTTPServer((a.bind, a.port), Handler)
     print(f'progress page for {REPO} on http://{a.bind}:{a.port}/', flush=True)
     srv.serve_forever()

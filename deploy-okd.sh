@@ -488,6 +488,7 @@ oc get nodes
 [ "${READY:-0}" -ge "$EXPECTED" ] || err "not all nodes became Ready — approve remaining CSRs manually: oc get csr"
 verify_cluster_health
 phase_mark ready
+progress_step deploy "Post-install (admin user, monitoring, DevOps add-ons)" "waits for your answers"
 
 # ── 11b. schedule the teardown (functions/autodestroy.sh) ─────────────────
 schedule_autodestroy
