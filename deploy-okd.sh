@@ -54,7 +54,7 @@ Usage: ./deploy-okd.sh [options]
   --devops          install DevOps tooling on the running cluster (interactive
                     menu, or use --devops-components). Works on a fresh deploy
                     and on an already-running cluster.
-  --devops-components LIST  comma list of: cert-manager,argocd,jenkins,gitlab,
+  --devops-components LIST  comma list of: cert-manager,argocd,odf,jenkins,gitlab,
                     harbor,artifactory,awx,sonarqube,jaeger,opensearch,istio,kiali,
                     kafka,kafka-kraft,strimzi-kafka,appsim,loki,loki-operator,tempo,
                     tempo-operator,otel,otel-operator,observability,observability-operator,
@@ -162,6 +162,7 @@ while [ $# -gt 0 ]; do
 done
 
 validate_deploy_flags
+start_progress_server   # functions/progress.sh
 load_env
 DOMAIN=${TF_VAR_dns_domain:?TF_VAR_dns_domain is required}
 export KUBECONFIG="$PWD/ignition/auth/kubeconfig"

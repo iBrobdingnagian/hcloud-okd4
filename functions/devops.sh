@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # functions/devops.sh — optional DevOps stack
-#   operators (OLM): cert-manager, ArgoCD, GitLab
+#   operators (OLM): cert-manager, ArgoCD, GitLab, ODF
 #   Helm:            Harbor (+ Dex OIDC bridge), JFrog Artifactory OSS, AWX
 #   image/Deployment: Jenkins (OpenShift Jenkins image, OAuth login)
 # Sourced by deploy-okd.sh; not meant to be executed directly.
@@ -303,6 +303,48 @@ ACR
     DEVOPS_NOTE="$DEVOPS_NOTE
   argocd      : installed but route not ready yet — oc -n argocd get route argocd-server"
   fi
+  return 0
+}
+
+# ── ODF / OpenShift Data Foundation (operator) ────────────────────────────
+# odf-operator ships in the Red Hat catalog (redhat-operators), which only exists
+# with a Red Hat pull secret; plain OKD clusters have community-operators only.
+# So resolve the package at runtime: prefer odf-operator, fall back to its
+# upstream ocs-operator / rook-ceph, and subscribe from whichever catalog
+# actually carries it, on that package's default channel.
+# Only the operator is installed: a StorageCluster needs raw block devices on
+# the storage nodes (e.g. Hetzner volumes + Local Storage Operator), which this
+# lab does not attach by default — the summary says how to finish the setup.
+install_odf() {
+  log "Installing ODF (OpenShift Data Foundation operator)"
+  local ns=openshift-storage pkg="" src="" chan="" p pm
+  for p in odf-operator ocs-operator rook-ceph-operator rook-ceph; do
+    pm=$(oc get packagemanifest -n "$CATALOG_NS" -o json 2>/dev/null \
+      | jq -c --arg p "$p" '[.items[] | select(.metadata.name==$p)] | first // empty')
+    [ -n "$pm" ] || continue
+    pkg=$p
+    src=$(echo "$pm" | jq -r '.status.catalogSource')
+    chan=$(echo "$pm" | jq -r '.status.defaultChannel')
+    break
+  done
+  if [ -z "$pkg" ]; then
+    echo "    no ODF/OCS/Rook-Ceph package in any catalog (odf-operator needs the redhat-operators catalog)"
+    DEVOPS_NOTE="$DEVOPS_NOTE
+  odf         : FAILED — no odf-operator/ocs-operator/rook-ceph package in the cluster's catalogs"
+    return 1
+  fi
+  echo "    using package $pkg from catalog $src (channel $chan)"
+  # _subscribe reads CATALOG_SRC; scope the override to this installer
+  local CATALOG_SRC=$src
+  _olm_subscribe "$ns" "$pkg" "$chan" || { DEVOPS_NOTE="$DEVOPS_NOTE
+  odf         : operator install FAILED — check: oc -n $ns get csv,sub,ip"; return 1; }
+  # ODF schedules its operands on nodes carrying this label; mark the workers
+  oc label nodes -l node-role.kubernetes.io/worker= \
+    cluster.ocs.openshift.io/openshift-storage= --overwrite >/dev/null 2>&1 || true
+  oc label namespace "$ns" openshift.io/cluster-monitoring=true --overwrite >/dev/null 2>&1 || true
+  DEVOPS_NOTE="$DEVOPS_NOTE
+  odf         : $pkg operator installed in '$ns' (workers labelled for storage).
+                Create a StorageCluster once the workers have raw disks (min. 3 nodes)"
   return 0
 }
 
@@ -1693,6 +1735,7 @@ install_devops() {
     echo " 28) Sim:Bookinfo — Istio Bookinfo in the mesh + traffic gen (classic Kiali demo)"
     echo " 29) Sim:Emoji    — emojivoto in the mesh (built-in vote-bot traffic)"
     echo " 30) All          — all DevOps tools (no app simulations)"
+    echo " 31) ODF          — OpenShift Data Foundation operator (Ceph storage) [heavy]"
     printf 'Selection [1 2 3, or 0 to finish]: '
     read -r DSEL || DSEL=0; DSEL=${DSEL:-1 2 3}   # Ctrl-D / EOF => 0 (done)
     for n in $DSEL; do
@@ -1727,6 +1770,7 @@ install_devops() {
         27) selected="$selected appsim-mesh" ;;
         28) selected="$selected appsim-bookinfo" ;;
         29) selected="$selected appsim-emojivoto" ;;
+        31) selected="$selected odf" ;;
         30) selected="cert-manager argocd jenkins gitlab harbor artifactory awx sonarqube kafka kafka-kraft strimzi-kafka" ;;
       esac
     done
@@ -1766,6 +1810,7 @@ install_devops() {
     case "$want" in
       cert-manager) ;;  # already done above
       argocd)  run_addon install_argocd || failed=1 ;;
+      odf|ocs) run_addon install_odf || failed=1 ;;
       jenkins) run_addon install_jenkins || failed=1 ;;
       gitlab)  run_addon install_gitlab || failed=1 ;;
       harbor)  run_addon install_harbor || failed=1 ;;
@@ -1796,7 +1841,7 @@ install_devops() {
       otel|otel-operator) ;;  # deferred below so Tempo exists first (OTLP target)
       observability|obs)      run_addon install_loki helm || failed=1; run_addon install_tempo helm || failed=1; run_addon install_otel helm || failed=1 ;;
       observability-operator) run_addon install_loki operator || failed=1; run_addon install_tempo operator || failed=1; run_addon install_otel operator || failed=1 ;;
-      *) failed=1; echo "    unknown component: $want (use cert-manager, argocd, jenkins, gitlab, harbor, artifactory, awx, sonarqube, jaeger, opensearch, istio, kiali, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-mesh, appsim-bookinfo, appsim-emojivoto, appsim-all)" ;;
+      *) failed=1; echo "    unknown component: $want (use cert-manager, argocd, odf, jenkins, gitlab, harbor, artifactory, awx, sonarqube, jaeger, opensearch, istio, kiali, kafka, kafka-kraft, strimzi-kafka, appsim, loki[-operator], tempo[-operator], otel[-operator], observability[-operator], appsim-gitops, appsim-boutique, appsim-events, appsim-awx, appsim-cicd, appsim-mesh, appsim-bookinfo, appsim-emojivoto, appsim-all)" ;;
     esac
   done
   # OpenTelemetry last: its OTLP exporter targets Tempo, so Tempo must be up

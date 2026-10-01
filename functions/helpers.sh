@@ -20,6 +20,7 @@ step() {  # step "<title>" "<typical duration>"
   printf '\n\033[1;34mPhase %d — %s\033[0m\n' "$STEP" "$1"
   printf '\033[0;36m    elapsed: %s | typical duration of this step: %s\033[0m\n' \
     "$(elapsed)" "$2"
+  progress_step deploy "$1" "$2"   # functions/progress.sh
 }
 
 # All make targets run inside the toolbox. --dns 1.1.1.1 bypasses Docker

@@ -10,6 +10,7 @@ REPO_ROOT=$(cd "$(dirname "$0")" && pwd)
 . "$REPO_ROOT/functions/context.sh"
 cluster_dispatch destroy "$@"
 . "$REPO_ROOT/functions/lifecycle.sh"
+. "$REPO_ROOT/functions/progress.sh"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 err() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -22,6 +23,8 @@ while [ $# -gt 0 ]; do
     *) err "unknown option: $1" ;;
   esac
 done
+start_progress_server
+progress_step destroy "Verifying cluster ownership" "<1 min"
 load_env
 DOMAIN=${TF_VAR_dns_domain:?TF_VAR_dns_domain is required}
 export KUBECONFIG="$PWD/ignition/auth/kubeconfig"
@@ -80,6 +83,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 docker image inspect "$TOOLBOX" >/dev/null 2>&1 || err "toolbox image $TOOLBOX not found"
 
+progress_step destroy "Confirming teardown" "waits for 'yes' (skipped with --yes)"
 if [ "$ASSUME_YES" = 1 ]; then
   log "Non-interactive destroy (--yes): destroying infrastructure, keeping snapshots and local state"
 else
@@ -100,6 +104,7 @@ fi
 # carrying this cluster's unique node-pool label, or (legacy only) attached
 # to its verified network. A missing network never broadens the selection.
 log "Removing cluster-autoscaler nodes (not managed by terraform)"
+progress_step destroy "Removing cluster-autoscaler nodes" "<1 min"
 CA_NETID=$(hcloud_list networks | jq -r --arg d "$DOMAIN" '.networks[] | select(.name == $d) | .id')
 CA_NODES=$(ca_node_ids)
 if [ -f .cluster-autoscaler-installed ] || [ -n "$CA_NODES" ]; then
@@ -129,6 +134,7 @@ else
 fi
 
 log "Destroying infrastructure with terraform"
+progress_step destroy "Destroying infrastructure with terraform" "2-5 min"
 # chown the workspace back to the host user afterwards (the toolbox runs as
 # root and would otherwise leave terraform state etc. root-owned)
 docker run --rm --dns 1.1.1.1 --env-file .env \
@@ -136,10 +142,17 @@ docker run --rm --dns 1.1.1.1 --env-file .env \
   -v "$PWD":/workspace -w /workspace "$TOOLBOX" \
   bash -c "make destroy; rc=\$?; chown -R $(id -u):$(id -g) /workspace; exit \$rc"
 
+# The infrastructure is gone, so the deploy checkpoints no longer describe
+# anything real. Left in place, the next deploy skips ignition generation and
+# fails on the missing ignition/auth/kubeconfig.
+rm -rf .phases
+echo "  cleared deploy checkpoints (.phases/)"
+
 # CoreOS images may be shared by multiple clusters. Retain them on teardown.
 log "Keeping shared CoreOS snapshots (manage them separately in Hetzner)"
 
 # ── local install state ──────────────────────────────────────────────────
+progress_step destroy "Cleaning up local state" "instant"
 if [ "$ASSUME_YES" = 0 ] && { [ -d ignition ] || [ -d config ]; }; then
   printf '\nRemove local config/ and ignition/ dirs (required before a reinstall)?\nCredentials will be backed up first. [y/N]: '
   read -r DELLOCAL

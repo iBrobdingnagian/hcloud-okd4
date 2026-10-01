@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OKD Deploy Progress</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --fg: #1b1f24; --muted: #5f6b7a; --line: #dde1e6;
+  --ok: #1f8a4c; --run: #1f6feb; --bad: #c62828; --idle: #9aa5b1; --code: #f0f2f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216; --card: #171b21; --fg: #e6e9ed; --muted: #95a0ad; --line: #2a3038;
+    --ok: #3fb96f; --run: #4c8dff; --bad: #ef5350; --idle: #5c6773; --code: #0b0e12;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+h1 { font-size: 22px; margin: 0; }
+.badge { padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; }
+.meta { color: var(--muted); font-size: 13px; margin: 4px 0 20px; }
+.bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 20px; }
+.bar > div { height: 100%; background: var(--ok); transition: width .4s; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.card h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 12px; }
+ol { list-style: none; margin: 0; padding: 0; }
+li { display: flex; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+li:first-child { border-top: 0; }
+.dot { flex: none; width: 12px; height: 12px; border-radius: 50%; margin-top: 5px; background: var(--idle); }
+.done .dot { background: var(--ok); }
+.run .dot { background: var(--run); animation: pulse 1.4s infinite; }
+.fail .dot { background: var(--bad); }
+.pending .title { color: var(--muted); }
+.sub { color: var(--muted); font-size: 13px; }
+@keyframes pulse { 50% { opacity: .35; } }
+.error { color: var(--bad); font-weight: 600; }
+pre { background: var(--code); border-radius: 8px; padding: 12px; margin: 0; overflow-x: auto;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+.hint { color: var(--muted); font-size: 13px; }
+select { font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 2px 6px; }
+code { font-family: ui-monospace, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>OKD <span id="op">deploy</span> — <span id="cluster">…</span></h1>
+    <select id="pick" hidden aria-label="Cluster"></select>
+    <span id="state" class="badge" style="background:var(--idle)">loading</span>
+  </header>
+  <div class="meta" id="meta"></div>
+  <div class="bar"><div id="bar" style="width:0"></div></div>
+  <div id="err" class="card error" hidden></div>
+  <section class="card">
+    <h2>Phases</h2>
+    <ol id="steps"></ol>
+  </section>
+  <section class="card">
+    <h2>Console (last lines)</h2>
+    <pre id="tail" hidden></pre>
+    <p class="hint" id="nolog">No console transcript. To see live output here, run the deploy as
+      <code>./deploy-okd.sh … 2&gt;&amp;1 | tee logs/deploy-console.log</code>.
+      Lines that may contain credentials are redacted.</p>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const fmt = s => s ? new Date(s).toLocaleString() : '';
+const dur = since => {
+  if (!since) return '';
+  const t = Math.max(0, Math.floor((Date.now() - new Date(since)) / 1000));
+  const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), sec = t % 60;
+  return (h ? h + 'h ' : '') + m + 'm ' + String(sec).padStart(2, '0') + 's';
+};
+let last = null;
+// ?cluster=NAME pins one cluster; otherwise the server follows the active run
+let pinned = new URLSearchParams(location.search).get('cluster') || '';
+$('pick').addEventListener('change', e => {
+  pinned = e.target.value;
+  history.replaceState(null, '', pinned ? '?cluster=' + encodeURIComponent(pinned) : location.pathname);
+  tick();
+});
+
+function render(s) {
+  last = s;
+  $('cluster').textContent = s.cluster;
+  $('op').textContent = s.operation;
+  const pick = $('pick');
+  pick.hidden = s.clusters.length < 2;
+  pick.replaceChildren(new Option('follow active run', ''), ...s.clusters.map(c => new Option(c, c)));
+  pick.value = pinned;
+  const cp = Object.fromEntries(s.checkpoints.map(c => [c.name, c.at]));
+  const con = s.console;
+  const seen = con ? con.steps : [];
+  const cur = s.current;
+  // a running deploy says where it is; otherwise the transcript's last step
+  let curIdx = cur ? cur.index : -1;
+  if (curIdx < 0 && seen.length) {
+    const l = seen[seen.length - 1];
+    curIdx = s.steps.findIndex(t => l.title.startsWith(t));
+  }
+  const exit = s.last_operation && s.last_operation.exit_code;
+  const failed = !s.running && !s.complete && s.last_operation && s.last_operation.operation === s.operation
+    && ((con && con.error) || (exit !== null && exit !== undefined && exit !== 0));
+
+  let done = 0;
+  $('steps').innerHTML = '';
+  s.steps.forEach((title, i) => {
+    const ckpt = cp[s.step_checkpoint[i]];
+    let cls = 'pending', sub = '';
+    if (s.running) cls = i < curIdx ? 'done' : i === curIdx ? 'run' : 'pending';
+    else if (i === curIdx && failed) cls = 'fail';
+    else if (s.complete || ckpt || i < curIdx) cls = 'done';
+    if (cls === 'done') done++;
+    const fromLog = seen.find(x => x.title.startsWith(title));
+    if (cls === 'run') {
+      sub = 'running' + (cur.since ? ' for <span class="live" data-since="' + cur.since + '"></span>' : '')
+        + (cur.typical ? ' · typical ' + cur.typical : '');
+    } else if (fromLog) sub = `started at +${fromLog.elapsed || '?'} · typical ${fromLog.typical || '?'}`;
+    else if (cls === 'done' && ckpt) sub = 'checkpoint ' + fmt(ckpt);
+    const li = document.createElement('li');
+    li.className = cls;
+    li.innerHTML = '<span class="dot"></span><div><div class="title"></div><div class="sub"></div></div>';
+    li.querySelector('.title').textContent = (cls === 'run' && cur.title) || (fromLog ? fromLog.title : title);
+    li.querySelector('.sub').innerHTML = sub;
+    $('steps').appendChild(li);
+  });
+  const pct = Math.round(100 * (done + (s.running ? 0.5 : 0)) / s.steps.length);
+  $('bar').style.width = pct + '%';
+
+  const [label, color] = s.running ? [`running · step ${curIdx + 1}/${s.steps.length}`, 'var(--run)']
+    : failed ? ['failed', 'var(--bad)']
+    : done === s.steps.length ? ['complete', 'var(--ok)'] : ['idle', 'var(--idle)'];
+  $('state').textContent = label;
+  $('state').style.background = color;
+
+  const errText = con && con.error;
+  $('err').hidden = !(failed && errText);
+  $('err').textContent = errText || '';
+
+  $('tail').hidden = !con;
+  $('nolog').hidden = !!con || s.operation !== 'deploy';
+  $('tail').parentElement.hidden = s.operation !== 'deploy';
+  if (con) {
+    const pre = $('tail');
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
+    pre.textContent = con.tail.join('\n');
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  }
+  clock();
+}
+
+// live counters tick every second between the 5 s status polls
+function clock() {
+  document.querySelectorAll('.live').forEach(el => el.textContent = dur(el.dataset.since));
+  if (!last) return;
+  const s = last, lo = s.last_operation, con = s.console;
+  $('meta').textContent = [
+    s.running && s.started && `${s.operation} running for ${dur(s.started)} (since ${fmt(s.started)})`,
+    !s.running && lo && `last ${lo.operation}: ${fmt(lo.started)} → ${lo.finished ? fmt(lo.finished) + ' (exit ' + lo.exit_code + ')' : '?'}`,
+    con && `log updated ${fmt(con.updated)}`,
+    `refreshed ${new Date(s.now).toLocaleTimeString()}`,
+  ].filter(Boolean).join(' · ');
+}
+setInterval(clock, 1000);
+
+async function tick() {
+  try {
+    const r = await fetch('status.json' + (pinned ? '?cluster=' + encodeURIComponent(pinned) : ''), { cache: 'no-store' });
+    render(await r.json());
+  } catch (e) {
+    $('state').textContent = 'server unreachable';
+    $('state').style.background = 'var(--bad)';
+  }
+}
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>
