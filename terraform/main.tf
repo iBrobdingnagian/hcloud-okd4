@@ -44,6 +44,7 @@ module "master" {
   image           = data.hcloud_image.image.id
   image_name      = var.image
   server_type     = var.server_type_master
+  server_types    = var.server_types_master == "" ? [] : split(",", var.server_types_master)
   labels = merge(local.cluster_labels, {
     "${var.dns_domain}/master"  = "true",
     "${var.dns_domain}/ingress" = "true"
@@ -65,6 +66,7 @@ module "worker" {
   image           = data.hcloud_image.image.id
   image_name      = var.image
   server_type     = var.server_type_worker
+  server_types    = var.server_types_worker == "" ? [] : split(",", var.server_types_worker)
   labels = merge(local.cluster_labels, {
     "${var.dns_domain}/worker"  = "true"
     "${var.dns_domain}/ingress" = "true"

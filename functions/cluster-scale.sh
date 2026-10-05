@@ -50,6 +50,12 @@ handle_existing_cluster() {
   elif [ "$FLAG_CA" = 1 ]; then
     install_cluster_autoscaler || exit 1
     exit 0
+  elif [ "${FLAG_LETSENCRYPT:-0}" = 1 ]; then
+    install_letsencrypt || exit 1
+    exit 0
+  elif [ -n "${FLAG_DEFCON:-}" ]; then
+    run_defcon || exit 1
+    exit 0
   elif [ "$ASSUME_YES" = 1 ]; then
     err "found $EXISTING_SERVERS server(s) of $DOMAIN in Hetzner — run ./destroy-okd.sh first, or re-run with --scale / --rescale / --monitoring"
   else
@@ -65,9 +71,11 @@ handle_existing_cluster() {
     echo "  4) Admin — create htpasswd admin user (replaces kubeadmin)"
     echo "  5) DevOps — install cert-manager / ArgoCD / Jenkins / GitLab / Harbor / JFrog / AWX"
     echo "  6) Cluster Autoscaler — Hetzner-API node pool (scales on Pending pods)"
-    echo "  7) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
-    printf 'Selection [7]: '
-    read -r SCSEL; SCSEL=${SCSEL:-7}
+    echo "  7) Let's Encrypt — publicly-trusted certificates for *.apps and api (staging or production)"
+    echo "  8) DEFCON scenarios — break the lab cluster on purpose and practise repairing it"
+    echo "  9) Exit (run ./destroy-okd.sh first if you want a fresh deploy)"
+    printf 'Selection [9]: '
+    read -r SCSEL; SCSEL=${SCSEL:-9}
     case "$SCSEL" in
       1) DO_SCALE=1 ;;
       2) run_rescale || exit 1
@@ -81,6 +89,14 @@ handle_existing_cluster() {
       5) install_devops || exit 1
          exit 0 ;;
       6) install_cluster_autoscaler || exit 1
+         exit 0 ;;
+      7) printf 'Use production certificates (trusted by browsers, rate-limited)? [y/N, N = staging]: '
+         read -r LEPROD
+         [ "$LEPROD" = "y" ] || [ "$LEPROD" = "Y" ] && FLAG_LE_PROD=1
+         install_letsencrypt || exit 1
+         exit 0 ;;
+      8) FLAG_DEFCON=menu
+         run_defcon || exit 1
          exit 0 ;;
     esac
   fi
@@ -155,6 +171,14 @@ MDOWNWARN
     fi
   fi
 
+  # nodes being ADDED may use a different VM size than the existing ones
+  if [ "$NEW_WORKERS" -gt "$CUR_WORKERS" ]; then
+    choose_new_node_type worker $((NEW_WORKERS - CUR_WORKERS))
+  fi
+  if [ "$NEW_MASTERS" -gt "$CUR_MASTERS" ]; then
+    choose_new_node_type master $((NEW_MASTERS - CUR_MASTERS))
+  fi
+
   apply_scale
   exit 0
 }
@@ -179,6 +203,12 @@ apply_scale() {
   else
     make fetch
     make build
+  fi
+
+  # going to 0 workers: the masters must take over the worker role BEFORE the
+  # workers are drained, or their pods have nowhere to go
+  if [ "$NEW_WORKERS" -eq 0 ] && [ "$CUR_WORKERS" -gt 0 ]; then
+    set_masters_schedulable true || true
   fi
 
   # ── scale-down: drain/remove nodes BEFORE terraform destroys their VMs ──
@@ -219,6 +249,9 @@ apply_scale() {
     done
   fi
 
+  # per-node VM sizes: existing nodes keep their real size, new ones get the chosen type
+  plan_node_types || return 1
+
   sedi -E \
     -e "s|^TF_VAR_replicas_master=.*|TF_VAR_replicas_master=$NEW_MASTERS|" \
     -e "s|^TF_VAR_replicas_worker=.*|TF_VAR_replicas_worker=$NEW_WORKERS|" .env
@@ -254,6 +287,10 @@ apply_scale() {
     echo "    all $EXPECTED nodes are Ready"
   else
     echo "    WARNING: node count is ${READY:-0}, expected $EXPECTED — check: oc get nodes / oc get csr"
+  fi
+  # keep node roles consistent with the new topology (see functions/scheduling.sh)
+  if [ "$NEW_WORKERS" -ne "$CUR_WORKERS" ] && [ "${READY:-0}" -ge "$EXPECTED" ]; then
+    apply_node_roles "$NEW_WORKERS" || true
   fi
   if [ "$NEW_MASTERS" -ne "$CUR_MASTERS" ]; then
     _wait_etcd_healthy "$NEW_MASTERS" 420 || { echo "etcd has not recovered after scaling" >&2; return 1; }

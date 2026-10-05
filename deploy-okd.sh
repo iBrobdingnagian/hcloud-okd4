@@ -74,6 +74,10 @@ Usage: ./deploy-okd.sh [options]
                     same syntax as --duration); defaults to --duration
   --scale           if an existing cluster is found, offer to add masters/
                     workers to it instead of refusing to proceed
+  --new-worker-type T  with --scale/--autoscale: VM size (e.g. cx43) for the worker(s)
+                    being ADDED; existing nodes keep their size. Default: same as now.
+                    Interactive --scale asks for it (Enter = same, ? = price list).
+  --new-master-type T  same for master(s) being added (experimental, see --scale)
   --rescale         change CPU/RAM of existing nodes in place WITHOUT destroying
                     the cluster (Hetzner change-type, disk kept). Rolling, one
                     node at a time (drain -> power off -> change type -> power on
@@ -103,6 +107,23 @@ Usage: ./deploy-okd.sh [options]
   --yes             non-interactive: defaults for everything not given above
                     (profile 2: 3 masters, 3 workers, current region,
                     cheapest types, 8h)
+  --defcon          DEFCON scenarios: deliberately break a RUNNING lab cluster in
+                    realistic, reversible ways (bad image, broken service, blocked
+                    network, cordoned nodes, dead router, bad auth, DNS ...) and
+                    practise repairing it. Levels 5 (minor) to 1 (blackout).
+                    API server, etcd and your kubeconfig are never touched.
+  --defcon-list     list the scenarios (no cluster needed)
+  --defcon-scenario ID   start scenario ID or 'random'
+  --defcon-status | --defcon-hint | --defcon-check | --defcon-solve | --defcon-restore
+                    current mission | next hint (3 each) | verify your repair |
+                    show the answer | undo everything and return to normal
+  --letsencrypt     publicly-trusted certificates for *.apps and api via cert-manager +
+                    Let's Encrypt (DNS-01 through Cloudflare); staging CA unless
+                    --letsencrypt-prod. Works on a fresh deploy and on a running cluster.
+                    Issued certificates are saved to letsencrypt-backup/ and reused on a
+                    redeploy of the same hostnames until they expire.
+  --letsencrypt-prod  use the production Let's Encrypt CA (browser-trusted; rate-limited)
+  --le-email E      ACME account email (default: CLOUDFLARE_EMAIL from .env)
   --help            this text
 USAGE
 }
@@ -115,6 +136,9 @@ FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
 FLAG_RESCALE=0 FLAG_RESCALE_ROLE="" FLAG_RESCALE_TYPE=""
 FLAG_CA=0 FLAG_CA_TYPE="" FLAG_CA_MIN="" FLAG_CA_MAX="" FLAG_CA_SMOKE=0
 FLAG_RESUME=0 FLAG_TERRAFORM_PLAN=0
+FLAG_LETSENCRYPT=0 FLAG_LE_PROD=0 FLAG_LE_EMAIL="" LETSENCRYPT_NOTE=""
+FLAG_NEW_MASTER_TYPE="" FLAG_NEW_WORKER_TYPE=""
+FLAG_DEFCON="" FLAG_DEFCON_ID=""
 VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -151,6 +175,19 @@ while [ $# -gt 0 ]; do
     --ca-min)             FLAG_CA_MIN=${2:?--ca-min needs a value}; FLAG_CA=1; shift 2 ;;
     --ca-max)             FLAG_CA_MAX=${2:?--ca-max needs a value}; FLAG_CA=1; shift 2 ;;
     --ca-smoke-test)      FLAG_CA_SMOKE=1; shift ;;
+    --new-master-type)    FLAG_NEW_MASTER_TYPE=${2:?--new-master-type needs a server type}; shift 2 ;;
+    --new-worker-type)    FLAG_NEW_WORKER_TYPE=${2:?--new-worker-type needs a server type}; shift 2 ;;
+    --defcon)             FLAG_DEFCON=menu; shift ;;
+    --defcon-list)        FLAG_DEFCON=list; shift ;;
+    --defcon-scenario)    FLAG_DEFCON=scenario; FLAG_DEFCON_ID=${2:?--defcon-scenario needs an id or 'random'}; shift 2 ;;
+    --defcon-status)      FLAG_DEFCON=status; shift ;;
+    --defcon-hint)        FLAG_DEFCON=hint; shift ;;
+    --defcon-check)       FLAG_DEFCON=check; shift ;;
+    --defcon-solve)       FLAG_DEFCON=solve; shift ;;
+    --defcon-restore)     FLAG_DEFCON=restore; shift ;;
+    --letsencrypt)        FLAG_LETSENCRYPT=1; shift ;;
+    --letsencrypt-prod)   FLAG_LETSENCRYPT=1; FLAG_LE_PROD=1; shift ;;
+    --le-email)           FLAG_LE_EMAIL=${2:?--le-email needs a value}; FLAG_LETSENCRYPT=1; shift 2 ;;
     --autoscale)          FLAG_AUTOSCALE=1; shift ;;
     --autoscale-min)      FLAG_AUTOSCALE_MIN=${2:?--autoscale-min needs a value}; shift 2 ;;
     --autoscale-max)      FLAG_AUTOSCALE_MAX=${2:?--autoscale-max needs a value}; shift 2 ;;
@@ -177,6 +214,7 @@ if [ "$FLAG_RESUME" = 1 ]; then
     || err "--resume uses the recorded configuration; do not pass topology/release overrides"
   phase_done configured || err "no deployment checkpoint; cannot resume safely"
 fi
+if [ "$FLAG_DEFCON" = list ]; then defcon_list; exit 0; fi
 
 # ── pre-flight checks (functions/preflight.sh) ───────────────────────────
 preflight_checks
@@ -186,6 +224,11 @@ if [ -n "$DOMAIN" ]; then
   EXISTING_SERVERS=$(cluster_servers | jq '.servers | length')
 else
   EXISTING_SERVERS=0
+fi
+
+# ── 0. DEFCON scenarios need a running cluster (never start a deploy for them) ─
+if [ -n "$FLAG_DEFCON" ] && [ "${EXISTING_SERVERS:-0}" -le 0 ] 2>/dev/null; then
+  err "DEFCON scenarios need a running cluster for $DOMAIN, found none — deploy one first"
 fi
 
 # ── 0. autoscaler mode: a foreground watch loop against a running cluster ─
@@ -338,13 +381,26 @@ grep -q '^TF_VAR_network_zone=' .env \
   || echo "TF_VAR_network_zone=$NETWORK_ZONE" >> .env
 
 # controlPlane.replicas = masters; compute.replicas stays 0 (terraform
-# creates the worker VMs; they join via CSR approval)
-python3 - "$MASTERS" <<'EOF'
+# creates the worker VMs; they join via CSR approval).
+# baseDomain/metadata.name must ALSO be synced from TF_VAR_dns_domain here,
+# every run: install-config.yaml is a standalone file that nothing else
+# updates, so if it's ever left over from a different domain (a prior
+# deploy, a manual edit, a copy-pasted example) it silently bakes a
+# DIFFERENT cluster identity into the ignition configs than the domain
+# Terraform actually provisions DNS/servers for — the API/MCS hostnames
+# openshift-install waits on then point at infrastructure that doesn't
+# exist, and the bootstrap hangs forever ("dial tcp ...: i/o timeout").
+python3 - "$MASTERS" "$DOMAIN" <<'EOF'
 import sys, yaml
 m = int(sys.argv[1])
+name, _, base = sys.argv[2].partition('.')
+if not base:
+    sys.exit(f"TF_VAR_dns_domain '{sys.argv[2]}' must be <name>.<base-domain>")
 d = yaml.safe_load(open('install-config.yaml'))
 d['controlPlane']['replicas'] = m
 d['compute'][0]['replicas'] = 0
+d['baseDomain'] = base
+d['metadata']['name'] = name
 yaml.safe_dump(d, open('install-config.yaml', 'w'), default_flow_style=False)
 EOF
 
@@ -462,6 +518,11 @@ verify_cluster_health
 phase_mark ready
 progress_step deploy "Post-install (admin user, monitoring, DevOps add-ons)" "waits for your answers"
 
+# ── 11a. node roles (functions/scheduling.sh) ─────────────────────────────
+# 0 workers: masters keep the worker role (single node). 1+ workers: masters
+# become control-plane only and the workers carry the worker role.
+apply_node_roles "$WORKERS" || true
+
 # ── 11b. schedule the teardown (functions/autodestroy.sh) ─────────────────
 schedule_autodestroy
 
@@ -503,6 +564,20 @@ elif [ "$ASSUME_YES" = 0 ]; then
   fi
 fi
 
+# ── 11f. Let's Encrypt certificates (optional; functions/letsencrypt.sh) ──
+if [ "$FLAG_LETSENCRYPT" = 1 ]; then
+  install_letsencrypt || true
+elif [ "$ASSUME_YES" = 0 ]; then
+  printf "\nIssue Let's Encrypt certificates for *.apps and api (DNS-01 via Cloudflare)? [y/N]: "
+  read -r MKLE
+  if [ "$MKLE" = "y" ] || [ "$MKLE" = "Y" ]; then
+    printf 'Production CA (browser-trusted, rate-limited) instead of staging? [y/N]: '
+    read -r LEPROD
+    if [ "$LEPROD" = "y" ] || [ "$LEPROD" = "Y" ]; then FLAG_LE_PROD=1; fi
+    install_letsencrypt || true
+  fi
+fi
+
 # ── 12. summary ──────────────────────────────────────────────────────────
 if [ -n "$ADMIN_CREATED" ]; then
   CRED_USER=$ADMIN_CREATED
@@ -527,7 +602,8 @@ cat <<SUMMARY
 
   $AUTODESTROY_NOTE
   $MONITORING_NOTE${DEVOPS_NOTE:+
-  $DEVOPS_NOTE}
+  $DEVOPS_NOTE}${LETSENCRYPT_NOTE:+
+$LETSENCRYPT_NOTE}
 SUMMARY
 if [ -z "$ADMIN_CREATED" ]; then
 cat <<'HOWTO'

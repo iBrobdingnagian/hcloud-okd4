@@ -108,10 +108,13 @@ resource "hcloud_firewall" "master" {
   }
   # etcd server and peer ports
   rule {
-    direction  = "in"
-    protocol   = "tcp"
-    port       = "2379-2380"
-    source_ips = [for s in module.master.ipv4_addresses : "${s}/32"]
+    direction = "in"
+    protocol  = "tcp"
+    port      = "2379-2380"
+    # bootstrap is a temporary etcd member that the master joins during
+    # bootstrap — raft needs it to dial the master's 2380 too, so it must be
+    # allowed here or the two-member cluster loses quorum
+    source_ips = [for s in concat(module.master.ipv4_addresses, module.bootstrap.ipv4_addresses) : "${s}/32"]
   }
 }
 

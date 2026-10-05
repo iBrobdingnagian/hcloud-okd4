@@ -30,6 +30,12 @@ variable "server_type" {
   default     = "cx11"
 }
 
+variable "server_types" {
+  type        = list(string)
+  description = "Optional per-node server types (index i = node i+1); missing/empty entries fall back to server_type"
+  default     = []
+}
+
 variable "image" {
   type        = string
   description = "Hetzner Cloud system image"
@@ -107,7 +113,7 @@ variable "subnet" {
 
 variable "image_name" {
   type        = string
-  description = "Either fcos or rhcos (necessary for ignition rendering)"
+  description = "fcos (necessary for ignition rendering)"
   default     = "fcos"
 }
 

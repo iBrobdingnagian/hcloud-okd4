@@ -96,7 +96,7 @@ from). All are free.
 |------|---------------|---------|
 | **Docker** | runs the "toolbox" that does Packer/Terraform/Ansible | https://docs.docker.com/get-docker/ |
 | **jq** | reads JSON from the Hetzner/Cloudflare APIs | `brew install jq` / `apt install jq` |
-| **oc** | the OpenShift command-line client | https://mirror.openshift.com/pub/openshift-v4/clients/ocp/ (or `brew install openshift-cli`) |
+| **oc** | the OpenShift command-line client | https://github.com/okd-project/okd/releases (or `brew install openshift-cli`) |
 | **Python 3 + PyYAML** | edits the install config | usually preinstalled; `pip3 install pyyaml` if missing |
 | **git** | to clone this repo | https://git-scm.com |
 

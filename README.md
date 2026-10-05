@@ -72,6 +72,59 @@ When run interactively without `--masters`/`--workers`/`--master-type`/
    Selected automatically if you pass `--masters`/`--workers`/
    `--master-type`/`--worker-type` directly.
 
+### DEFCON scenarios (`--defcon`)
+
+A training mode: deliberately break your **running lab cluster** in realistic, reversible ways, then find
+and repair the fault. Also in the running-cluster menu ("DEFCON scenarios").
+
+```bash
+./deploy-okd.sh --defcon-list                 # the catalogue (no cluster needed)
+./deploy-okd.sh --defcon-scenario random      # or an id, e.g. router-placement
+./deploy-okd.sh --defcon-hint                 # 3 progressive hints per scenario
+./deploy-okd.sh --defcon-check                # verify your repair (time and hints are scored)
+./deploy-okd.sh --defcon-solve                # show the answer
+./deploy-okd.sh --defcon-restore              # undo everything, back to normal
+```
+
+| Level | Scenarios |
+|---|---|
+| DEFCON 5 — minor | `imagepull` (bad image tag), `oomkill` (memory limit too low) |
+| DEFCON 4 — degraded | `svc-selector` (service with no endpoints), `netpol` (deny-all policy), `pvc-pending` (missing storage class) |
+| DEFCON 3 — serious | `cordon` (all workers cordoned), `kubelet-stop` (a worker goes NotReady; needs 2+ worker-only nodes) |
+| DEFCON 2 — critical | `router-placement` (router cannot schedule: routes and console down), `bad-idp` (authentication degraded), `dns-upstream` (external DNS broken) |
+| DEFCON 1 — blackout | `blackout` (router + cordon + DNS at once) |
+
+Safety: only reversible changes; the API server, etcd, your kubeconfig and `kubeadmin` are never touched, so
+you always keep the access you need to fix things. One scenario at a time, and it refuses to start unless every
+cluster operator is healthy. Everything a scenario changes is recorded under `.defcon/` (gitignored) and
+`--defcon-restore` puts the original values back. Workloads for the exercise live in the `defcon-lab` namespace.
+Scores are appended to `.defcon/scores`. Do not run it on a cluster people depend on.
+
+### Let's Encrypt certificates (`--letsencrypt`)
+
+Publicly-trusted certificates for the console/apps (`*.apps.<domain>`) and the API (`api.<domain>`),
+issued by cert-manager with **DNS-01 through Cloudflare** (the same zone Terraform already uses):
+
+```bash
+./deploy-okd.sh --letsencrypt                 # staging CA (not browser-trusted; safe for labs)
+./deploy-okd.sh --letsencrypt --letsencrypt-prod   # production CA
+```
+
+It also appears in the menu shown for a running cluster ("Let's Encrypt"). It installs cert-manager if
+missing, creates the `letsencrypt-staging|prod` ClusterIssuer from `TF_VAR_cloudflare_api_token` and
+`CLOUDFLARE_EMAIL` (or `--le-email`), requests both certificates, then points the default
+IngressController and the API server at them. Renewal is automatic (cert-manager).
+
+- **Scaling:** the certificates belong to hostnames, not nodes, and the load balancer passes TCP through, so
+  adding/removing workers or masters needs nothing. Internal certificates (`api-int`, kubelets, etcd) stay on
+  the cluster CA and are not touched.
+- **Redeploys:** issued certificates are saved to `letsencrypt-backup/<domain>/<staging|prod>/` (gitignored,
+  **contains private keys**) and refreshed by `destroy-okd.sh`. A later deploy of the *same hostnames* reuses them
+  until they are within 7 days of expiry, so repeated lab redeploys do not hit Let's Encrypt's duplicate-certificate
+  rate limit (about 5 per week).
+- **kubeconfig:** a kubeconfig trusts only its own CA, so the issuing chain is appended to
+  `ignition/auth/kubeconfig` (the original is kept as `kubeconfig.orig`).
+
 ### Adaptive scaling
 
 If `deploy-okd.sh` finds an existing cluster for `TF_VAR_dns_domain` already
@@ -89,6 +142,24 @@ answer the prompts) to add or remove nodes on a live cluster.
   before the VM is destroyed. Even master counts are rejected (etcd quorum).
   After scaling masters, check `oc get etcd -o jsonpath='{.status.conditions}'`
   and `oc -n openshift-etcd get pods`.
+
+#### Different VM sizes for added nodes
+
+Nodes you add can be a different size from the existing ones (for example a bigger worker next to a small
+first node). Existing nodes are never resized:
+
+```bash
+./deploy-okd.sh --scale --workers 3 --new-worker-type cx43   # 2 new workers as cx43
+./deploy-okd.sh --scale                                       # interactive: asks the size (Enter = same, ? = price list)
+./deploy-okd.sh --autoscale --new-worker-type cx43            # autoscaled workers use that size
+./deploy-okd.sh --scale --masters 3 --new-master-type cx53    # experimental, see the master warning above
+```
+
+Terraform reads the optional `TF_VAR_server_types_master` / `TF_VAR_server_types_worker` (comma-separated,
+position *i* = `worker0<i>`; empty = `TF_VAR_server_type_*` for all). The script writes them for you: it reads the
+**real** size of every existing node from Hetzner first, keeps those entries, and appends the new type for the new
+positions (and truncates the list when scaling down). If a node's size cannot be read it refuses rather than let
+Terraform resize a node. `--rescale` clears the list for the role it rescales, since that role then has one size.
 
 #### Load-driven autoscaling (`--autoscale`)
 
@@ -350,11 +421,10 @@ You can set the desired release version with the `OPENSHIFT_RELEASE` environment
 Example:
 
 ```bash
-export DEPLOYMENT_TYPE=okd # Options: "okd" or "ocp", default is "okd"
 export OPENSHIFT_RELEASE=$(make latest_version) # or a fixed version like "4.19.9"
 ```
 
-For OCP (Red Hat OpenShift), you will also need a valid pull secret, available from cloud.redhat.com.
+A real Red Hat pull secret is not needed for OKD — leave the placeholder from `install-config.yaml.example` in place.
 
 ---
 
@@ -376,7 +446,7 @@ For OCP (Red Hat OpenShift), you will also need a valid pull secret, available f
    make generate_ignition
    ```
 5. Export required environment variables (see example in *Configuration*)
-6. Build Fedora/RedHat CoreOS image using Packer
+6. Build the Fedora CoreOS image using Packer
    ```bash
    make hcloud_image
    ```
@@ -461,26 +531,6 @@ export CLOUDFLARE_API_KEY=YOUR_API_KEY
 - Nodes are **not directly exposed to the internet** by default.
 - Only the load balancer is public accessible.
 - SSH access to nodes will only be possible with additional firewall configuration.
-
----
-
-## Deploying OCP (Red Hat OpenShift)
-
-To deploy OCP instead of OKD:
-
-```bash
-export DEPLOYMENT_TYPE=ocp
-export OPENSHIFT_RELEASE=4.19.9 # example version
-make fetch build run
-```
-
-You can also choose the latest version from a specific channel:
-
-```bash
-export OCP_RELEASE_CHANNEL=stable-4.19
-export OPENSHIFT_RELEASE=$(make latest_version)
-make fetch build run
-```
 
 ---
 

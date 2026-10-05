@@ -33,3 +33,13 @@ pull-secret.json
 !terraform/.terraform.lock.hcl
 __pycache__/
 *.py[cod]
+
+# Let's Encrypt certificates saved for reuse across redeploys (contain private keys)
+letsencrypt-backup/
+
+# DEFCON scenario state and scores (local only)
+.defcon/
+
+# local deploy run logs
+deploy-run.log
+deploy-start.txt
