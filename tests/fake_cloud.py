@@ -44,12 +44,14 @@ if command == 'docker':
         (work / 'fake-servers.json').write_text(json.dumps({'servers': servers}))
 elif command == 'curl':
     url = args[-1]
-    if '/locations' in url:
+    if '/actions/reset' in url:
+        (work / 'fake-reset-requested').touch()
+        raise SystemExit('unexpected reset during bootstrap')
+    elif '/locations' in url:
         print(json.dumps({'locations': [{'id': 1, 'name': 'nbg1', 'city': 'Nuremberg', 'country': 'DE', 'network_zone': 'eu-central'}]}))
-    elif '/datacenters' in url:
-        print(json.dumps({'datacenters': [{'location': {'name': 'nbg1'}, 'server_types': {'available': [1, 2]}}]}))
     elif '/server_types' in url:
         print(json.dumps({'server_types': [{'id': i, 'name': name, 'architecture': 'x86', 'deprecated': False,
+            'locations': [{'id': 1, 'name': 'nbg1', 'available': True, 'deprecation': None}],
             'cores': 8, 'memory': 32, 'disk': 100, 'prices': [{'location': 'nbg1', 'price_hourly': {'gross': '0.1'}}]}
             for i, name in ((1, 'cpx41'), (2, 'cpx21'))]}))
     elif '/images?' in url:
@@ -60,7 +62,8 @@ elif command == 'curl':
             servers['servers'] = [s for s in servers['servers'] if s['name'].startswith('bootstrap')]
         print(json.dumps(servers))
     elif url.endswith('/healthz'):
-        pass
+        if os.environ.get('FAKE_MCS_UNAVAILABLE') == '1':
+            sys.exit(22)
     else:
         raise SystemExit('unexpected fake curl request: ' + url)
 elif command == 'oc':
@@ -78,7 +81,7 @@ elif command == 'oc':
         pass
     else:
         raise SystemExit('unexpected fake oc request: ' + ' '.join(args))
-elif command == 'nc':
+elif command in ('nc', 'sleep'):
     pass
 else:
     raise SystemExit('unexpected fake command: ' + command)

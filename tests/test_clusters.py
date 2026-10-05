@@ -277,15 +277,18 @@ tb 'make infrastructure'
             stream.write('\nflush_dns() { :; }\n')
         binary = self.repo / 'bin'
         binary.mkdir()
-        for command in ('docker', 'curl', 'oc', 'nc'):
+        for command in ('docker', 'curl', 'oc', 'nc', 'sleep'):
             shutil.copy2(ROOT / 'tests/fake_cloud.py', binary / command)
             (binary / command).chmod(0o755)
         env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ['PATH'])
         first = subprocess.run(['bash', str(self.repo / 'deploy-okd.sh'), '--cluster', 'dev', '--yes'],
-                               env=dict(env, FAKE_FAIL='bootstrap'), capture_output=True, text=True, timeout=15)
+                               env=dict(env, FAKE_FAIL='bootstrap', FAKE_MCS_UNAVAILABLE='1'),
+                               capture_output=True, text=True, timeout=15)
         self.assertNotEqual(first.returncode, 0)
         work = self.repo / '.work/dev'
         self.assertTrue((work / '.phases/ignition').exists(), first.stdout + first.stderr)
+        # Slow bootstrap/image pulls must not trigger a destructive hard reset.
+        self.assertFalse((work / 'fake-reset-requested').exists(), first.stdout + first.stderr)
         self.assertFalse((work / '.phases/bootstrap-complete').exists())
         identity = (work / 'ignition/auth/kubeconfig').read_bytes()
         second = subprocess.run(['bash', str(self.repo / 'deploy-okd.sh'), '--cluster', 'dev', '--resume', '--yes'],

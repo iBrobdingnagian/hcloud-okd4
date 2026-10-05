@@ -6,26 +6,24 @@ select_region() {
 DEFAULT_LOC=${TF_VAR_location:-nbg1}
 
 log "Fetching Hetzner regions and live server-type availability ..."
-LOCATIONS_JSON=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
-  "https://api.hetzner.cloud/v1/locations")
-DC_JSON=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
-  "https://api.hetzner.cloud/v1/datacenters")
-TYPES_JSON=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
-  "https://api.hetzner.cloud/v1/server_types?per_page=50")
+LOCATIONS_JSON=$(hcloud_list locations) \
+  || err "could not fetch Hetzner locations (see API error above)"
+TYPES_JSON=$(hcloud_list server_types) \
+  || err "could not fetch Hetzner server types (see API error above)"
 echo "$LOCATIONS_JSON" | jq -e '.locations | length > 0' >/dev/null 2>&1 \
-  || err "could not fetch Hetzner locations (check HCLOUD_TOKEN)"
-echo "$DC_JSON" | jq -e '.datacenters | length > 0' >/dev/null 2>&1 \
-  || err "could not fetch Hetzner datacenters (check HCLOUD_TOKEN)"
+  || err "Hetzner returned no locations"
+echo "$TYPES_JSON" | jq -e '.server_types | length > 0' >/dev/null 2>&1 \
+  || err "Hetzner returned no server types"
 
-# usable = x86 (the packer snapshot is x86_64) and not deprecated;
+# usable = x86 (the packer snapshot is x86_64) and not deprecated in that location;
 # AVAIL_BY_LOC maps location name -> [usable type ids placeable there NOW]
-USABLE_IDS=$(echo "$TYPES_JSON" | jq \
-  '[.server_types[] | select(.architecture=="x86" and .deprecated==false) | .id]')
-AVAIL_BY_LOC=$(echo "$DC_JSON" | jq --argjson usable "$USABLE_IDS" '
-  reduce .datacenters[] as $d ({};
-    .[$d.location.name] = ((.[$d.location.name] // [])
-      + ($d.server_types.available | map(select(. as $i | $usable | index($i))))
-      | unique))')
+# Datacenter endpoints were removed on 2026-10-01. Availability and
+# deprecation are now reported per location on each server type.
+AVAIL_BY_LOC=$(echo "$TYPES_JSON" | jq '
+  reduce (.server_types[] | select(.architecture=="x86") | . as $t
+    | .locations[] | select(.available==true and .deprecation==null)
+    | {name, id: $t.id}) as $entry ({};
+      .[$entry.name] = ((.[$entry.name] // []) + [$entry.id] | unique))')
 
 # region rows: name city country network_zone usable_count
 REGION_ROWS=$(echo "$LOCATIONS_JSON" | jq -r --argjson avail "$AVAIL_BY_LOC" '
@@ -69,14 +67,13 @@ NETWORK_ZONE=$(echo "$ROW" | cut -f4)
 log "Checking live server-type availability and pricing in $LOC ..."
 AVAIL_IDS=$(echo "$AVAIL_BY_LOC" | jq --arg loc "$LOC" '.[$loc] // []')
 [ "$(echo "$AVAIL_IDS" | jq 'length')" -gt 0 ] \
-  || err "could not fetch live availability for $LOC (check HCLOUD_TOKEN)"
+  || err "no usable x86 server types available in $LOC right now"
 
 # OKD-compatible candidates: x86 (the packer snapshot is x86_64), not
 # deprecated, and placeable in $LOC RIGHT NOW. Sorted by hourly price.
 # Columns: name cores ram_gb disk_gb eur_per_hour(gross)
 CANDIDATES=$(echo "$TYPES_JSON" | jq -r --argjson avail "$AVAIL_IDS" --arg loc "$LOC" '
   .server_types[]
-  | select(.architecture=="x86" and .deprecated==false)
   | select(.id as $i | $avail | index($i))
   | . as $t
   | ($t.prices[] | select(.location==$loc) | .price_hourly.gross | tonumber) as $p

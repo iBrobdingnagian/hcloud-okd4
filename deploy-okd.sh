@@ -416,38 +416,10 @@ step "Deploying infrastructure (terraform + ansible, BOOTSTRAP=true)" "3-5 min"
 tb "make infrastructure BOOTSTRAP=true"
 flush_dns   # records were just (re)created — drop any negative cache
 
-# ── 9b. bootstrap ignition-race watchdog ─────────────────────────────────
-# The bootstrap VM boots while ansible is still uploading bootstrap.ign to
-# the ignition host. If Apache answers 404 in that window, Ignition treats
-# the 4xx as permanent, drops to the emergency shell and the node stays
-# dark forever (masters are safe: they get connection-refused from the
-# not-yet-running MCS, which Ignition retries). If the bootstrap MCS is
-# still down minutes after the upload, hard-reset the node once — a fresh
-# boot finds the file.
-step "Waiting for the bootstrap machine-config server" "2-6 min"
-B_JSON=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" \
-  "https://api.hetzner.cloud/v1/servers?name=bootstrap01.$DOMAIN")
-B_ID=$(echo "$B_JSON" | jq -r '.servers[0].id // empty')
-B_IP=$(echo "$B_JSON" | jq -r '.servers[0].public_net.ipv4.ip // empty')
-if [ -n "$B_IP" ] && [ -n "$B_ID" ]; then
-  RESET_DONE=0 t=0
-  until curl -ksf --max-time 5 "https://$B_IP:22623/healthz" >/dev/null 2>&1; do
-    t=$((t+1))
-    if [ "$t" -ge 18 ] && [ "$RESET_DONE" = 0 ]; then
-      log "MCS still dark after ~6 min — bootstrap likely lost the ignition race; hard-resetting it"
-      curl -s -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" \
-        "https://api.hetzner.cloud/v1/servers/$B_ID/actions/reset" >/dev/null
-      RESET_DONE=1
-    fi
-    if [ "$t" -gt 45 ]; then
-      log "MCS still down after ~15 min — continuing; the bootstrap watcher will report"
-      break
-    fi
-    sleep 20
-  done
-else
-  echo "    could not determine the bootstrap server — skipping the race check"
-fi
+# A closed MCS port is normal while the OS image and bootstrap containers
+# are being pulled/rendered. Never reset a node based on elapsed time alone:
+# a reset can interrupt that work and leave bootstrap unable to restart.
+# If the installer times out, inspect its console/journal before recovery.
 
 step "Waiting for bootstrap to complete" "15-40 min (longest phase)"
 echo "    Watcher is read-only; if it times out the install continues — retried once."
