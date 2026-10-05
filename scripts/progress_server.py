@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Serve a live deploy/destroy progress page for the cluster workspaces.
 
-Only two routes exist: / (the page) and /status.json[?cluster=NAME]. Nothing
-else in the workspaces is served — they hold .env, SSH keys and kubeconfigs.
+The public routes are / (status), /status.json[?cluster=NAME], and /manage
+(controls UI). /control.json and POST /operations require a local access token.
+Nothing else in the workspaces is served — they hold secrets and kubeconfigs.
 
 Workspaces are the repo root (the legacy cluster) and each .work/NAME. Without
 ?cluster= the page follows the one with a deploy/destroy running, else the one
@@ -26,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import secrets
 import subprocess
 import threading
 import time
@@ -34,8 +36,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from progress_controls import Controls
+
 REPO = Path(__file__).resolve().parent.parent
 PAGE = Path(__file__).resolve().parent / 'progress.html'
+MANAGE_PAGE = PAGE.with_name('manage.html')
 
 # per operation: ordered (step title prefix, typical duration, finishing checkpoint)
 OPERATIONS = {
@@ -323,6 +328,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Cache-Control', 'no-store')
+        self.send_header('Referrer-Policy', 'no-referrer')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -331,11 +339,52 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.path in ('/', '/index.html'):
             self._send(200, PAGE.read_bytes(), 'text/html; charset=utf-8')
+        elif url.path in ('/manage', '/manage.html'):
+            self._send(200, MANAGE_PAGE.read_bytes(), 'text/html; charset=utf-8')
+        elif url.path == '/control.json':
+            if self._authorized():
+                self._send(200, json.dumps(self.server.controls.snapshot()).encode(), 'application/json')
         elif url.path == '/status.json':
             requested = parse_qs(url.query).get('cluster', [''])[0]
             self._send(200, json.dumps(pick(requested)).encode(), 'application/json')
         else:
             self._send(404, b'not found', 'text/plain')
+
+    def _authorized(self):
+        supplied = self.headers.get('Authorization', '')
+        expected = 'Bearer ' + self.server.controls.token
+        if not secrets.compare_digest(supplied.encode(), expected.encode()):
+            self._send(403, b'{"error":"Enter the server control token to unlock operations."}', 'application/json')
+            return False
+        origin = self.headers.get('Origin')
+        if origin and origin not in ('http://' + self.headers.get('Host', ''),
+                                     'https://' + self.headers.get('Host', '')):
+            self._send(403, b'{"error":"Cross-origin operations are not allowed."}', 'application/json')
+            return False
+        return True
+
+    def do_POST(self):
+        if urlsplit(self.path).path != '/operations':
+            self._send(404, b'not found', 'text/plain')
+            return
+        if not self._authorized():
+            return
+        try:
+            if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+                raise ValueError('Expected application/json.')
+            size = int(self.headers.get('Content-Length', '0'))
+            if not 0 < size <= 8192:
+                raise ValueError('Invalid request size.')
+            data = json.loads(self.rfile.read(size))
+            result = self.server.controls.launch(data)
+        except (ValueError, UnicodeError) as exc:
+            self._send(400, json.dumps({'error': str(exc)}).encode(), 'application/json')
+        except BlockingIOError as exc:
+            self._send(409, json.dumps({'error': str(exc)}).encode(), 'application/json')
+        except OSError:
+            self._send(500, b'{"error":"Could not start operation; check server permissions and logs."}', 'application/json')
+        else:
+            self._send(202, json.dumps(result).encode(), 'application/json')
 
     def log_message(self, fmt, *args):
         pass
@@ -346,9 +395,12 @@ def main():
     ap.add_argument('--port', type=int, default=8093)
     ap.add_argument('--bind', default='0.0.0.0')
     a = ap.parse_args()
-    threading.Thread(target=health_loop, daemon=True).start()
     srv = ThreadingHTTPServer((a.bind, a.port), Handler)
+    srv.controls = Controls(REPO)
+    srv.controls.save_token()
+    threading.Thread(target=health_loop, daemon=True).start()
     print(f'progress page for {REPO} on http://{a.bind}:{a.port}/', flush=True)
+    print(f'controls: http://{a.bind}:{a.port}/manage (token: logs/progress-control-token)', flush=True)
     srv.serve_forever()
 
 

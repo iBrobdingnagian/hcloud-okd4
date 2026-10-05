@@ -21,6 +21,8 @@ start_progress_server() {
   local host
   host=$(hostname -I 2>/dev/null | awk '{print $1}')
   printf '\033[0;36m    live progress: http://%s:%s/\033[0m\n' "${host:-localhost}" "$PROGRESS_PORT"
+  printf '\033[0;36m    deploy / destroy controls: http://%s:%s/manage\033[0m\n' "${host:-localhost}" "$PROGRESS_PORT"
+  printf '    control token (on this host): %s/logs/progress-control-token\n' "$REPO_ROOT"
 }
 
 # progress_step <operation> <title> <typical duration> — current step for the

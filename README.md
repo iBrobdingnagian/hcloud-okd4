@@ -53,6 +53,42 @@ types, OKD release, lab duration, etc.). Without `--yes` both scripts walk you
 through interactive prompts (region picker, live pricing, version selection,
 htpasswd admin creation).
 
+### Browser deploy / destroy controls
+
+Deploy and destroy automatically start the existing Python progress server on
+port **8093**. Its status page remains at `http://HOST:8093/`; the new
+`http://HOST:8093/manage` page links to it and provides **Deploy**, **Resume**,
+and **Destroy** controls. Both URLs are printed when a script starts.
+To open the controls before running any deployment, start only the web server:
+
+```bash
+python3 scripts/progress_server.py --bind 127.0.0.1 --port 8093
+```
+
+Read `logs/progress-control-token` on that host and paste it into **Operator
+access**. The token is stored with mode 0600 and rotates on server restart.
+It authorizes real cloud operations; use localhost, an SSH tunnel, or a trusted
+HTTPS proxy for access. The existing public status routes remain read-only.
+An already-running server must be restarted once to load the new routes.
+
+Choose `legacy` for the repository `.env`, or a configured `clusters/NAME.yaml`
+for an isolated cluster. Legacy deploy exposes profiles, lab topology/tier,
+manual node counts/types, region, release, duration, and automatic teardown.
+Named clusters use their YAML settings; resume uses recorded checkpoints.
+Credentials and cluster configuration must already be prepared on the host.
+Review the command and type the displayed operation and cluster name to start.
+
+The page runs the existing scripts with `--yes`, preserving their locks and
+ownership checks. Admin password creation is skipped. Destroy retains shared
+snapshots and local install artifacts, as with CLI `--yes`. Browser-run output
+is visible only after unlocking and is saved privately to
+`logs/web-CLUSTER.log`; it may contain credentials. Early failures and exit codes
+appear on the controls page. The status link shows installation/teardown phases
+and cluster health. Closing the browser does not stop an operation.
+
+`PROGRESS_SERVER=0` disables automatic startup; `PROGRESS_BIND` and
+`PROGRESS_PORT` customize the script-started server (defaults: `0.0.0.0`, `8093`).
+
 ### Deployment profiles
 
 When run interactively without `--masters`/`--workers`/`--master-type`/

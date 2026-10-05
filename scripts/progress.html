@@ -56,6 +56,7 @@ code { font-family: ui-monospace, monospace; font-size: 13px; }
     <select id="pick" hidden aria-label="Cluster"></select>
     <span id="state" class="badge" style="background:var(--idle)">loading</span>
   </header>
+  <p><a id="manage" href="/manage">Deploy or destroy a cluster →</a></p>
   <div class="meta" id="meta"></div>
   <div class="bar"><div id="bar" style="width:0"></div></div>
   <div id="err" class="card error" hidden></div>
@@ -98,6 +99,7 @@ $('pick').addEventListener('change', e => {
 function render(s) {
   last = s;
   $('cluster').textContent = s.cluster;
+  $('manage').href = '/manage?cluster=' + encodeURIComponent(s.cluster);
   $('op').textContent = s.operation;
   const pick = $('pick');
   pick.hidden = s.clusters.length < 2;

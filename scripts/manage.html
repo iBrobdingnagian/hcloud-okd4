@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OKD cluster controls</title>
+<style>
+:root { color-scheme: light dark; --bg:#f4f6fa; --card:#fff; --ink:#172337; --muted:#59677b; --line:#d6deea; --blue:#2159c5; --red:#b32331; }
+@media(prefers-color-scheme:dark) { :root { --bg:#101720; --card:#182231; --ink:#edf2fa; --muted:#abb9ce; --line:#334259; --blue:#94b8ff; --red:#ff9aa4; } }
+* { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif; }
+main { max-width:980px; margin:auto; padding:32px 20px 64px; } header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:24px; }
+h1 { font-size:30px; margin:0; letter-spacing:-.03em; } h2,legend { font-size:18px; font-weight:650; } h2 { margin:0 0 12px; }
+p { margin:8px 0 16px; } a { color:var(--blue); } .eyebrow { color:var(--muted); font-size:12px; letter-spacing:.12em; text-transform:uppercase; margin:0 0 4px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:22px; margin:18px 0; }
+.muted,small { color:var(--muted); } small { display:block; margin-top:6px; } .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+label { display:block; } input,select,button { font:inherit; } input:not([type=radio]):not([type=checkbox]),select { display:block; width:100%; padding:10px 12px; margin-top:6px; border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--ink); }
+input[type=radio],input[type=checkbox] { accent-color:var(--blue); margin-right:8px; } button { border:0; border-radius:7px; padding:11px 18px; background:var(--blue); color:var(--card); cursor:pointer; font-weight:650; }
+button:disabled { opacity:.5; cursor:not-allowed; } :focus-visible { outline:3px solid var(--blue); outline-offset:3px; }
+fieldset { border:0; padding:0; margin:0; min-width:0; } legend { margin-bottom:12px; } .choices { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+.choice { border:1px solid var(--line); border-radius:8px; padding:14px; cursor:pointer; } .choice:has(input:checked) { border-color:var(--blue); outline:1px solid var(--blue); }
+.danger { color:var(--red); } #message { white-space:pre-wrap; } pre { background:var(--bg); padding:16px; border-radius:8px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:380px; overflow:auto; font-size:12px; }
+code { overflow-wrap:anywhere; } .row { display:flex; flex-wrap:wrap; align-items:center; gap:16px; margin-top:16px; } [hidden] { display:none !important; }
+@media(max-width:640px) { .grid,.choices { grid-template-columns:1fr; } .card { padding:16px; } }
+</style>
+</head>
+<body>
+<main>
+  <header><div><p class="eyebrow">OKD on Hetzner</p><h1>Cluster controls</h1></div><a id="status-link" href="/">View cluster status →</a></header>
+  <section class="card" aria-labelledby="access-title">
+    <h2 id="access-title">Operator access</h2>
+    <p class="muted">Use the control token from <code>logs/progress-control-token</code> on the server. It changes when the Python server restarts.</p>
+    <form id="access" class="grid">
+      <label>Control token<input id="token" type="password" required autocomplete="off" spellcheck="false"></label>
+      <div class="row"><button type="submit">Unlock controls</button><span id="access-state" role="status">Locked</span></div>
+    </form>
+  </section>
+  <form id="operation-form">
+    <fieldset id="controls" disabled>
+      <section class="card">
+        <h2>1. Choose a cluster</h2>
+        <label>Cluster configuration<select id="cluster"><option value="legacy">legacy — repository .env</option></select></label>
+        <p id="config-note" class="muted"></p>
+        <p id="cluster-state" role="status" class="muted">Unlock to load cluster activity.</p>
+      </section>
+      <section class="card">
+        <fieldset><legend>2. Choose an operation</legend>
+          <div class="choices">
+            <label class="choice"><input type="radio" name="operation" value="deploy" checked>Deploy<small>Create cluster infrastructure and install OKD.</small></label>
+            <label class="choice"><input type="radio" name="operation" value="resume">Resume<small>Continue an interrupted deployment from its checkpoints.</small></label>
+            <label class="choice"><input type="radio" name="operation" value="destroy">Destroy<small>Remove this cluster’s infrastructure and DNS records.</small></label>
+          </div>
+        </fieldset>
+      </section>
+      <section class="card" id="settings">
+        <h2>Deployment options</h2>
+        <div class="grid">
+          <label>Profile<select id="profile"><option value="2">Production — cost optimized (3 masters / 3 workers)</option><option value="1">Production — dedicated servers (3 masters / 3 workers)</option><option value="3">Lab</option><option value="4">Manual topology and server types</option></select></label>
+          <label>Region<input id="region" placeholder="Current configured region" pattern="[a-z0-9\-]+"></label>
+          <label>OKD release<input id="release" placeholder="Current configured release" pattern="[0-9]+\.[0-9]+[a-zA-Z0-9_.\-]*"></label>
+          <label>Duration<input id="duration" value="8" required pattern="[1-9][0-9]*m?"><small>Hours (8) or minutes (90m).</small></label>
+        </div>
+        <fieldset id="lab" hidden class="grid" style="margin-top:16px">
+          <label>Lab topology<select id="lab-topology"><option>1x0</option><option selected>1x1</option><option>1x2</option><option>1x3</option><option>3x3</option></select></label>
+          <label>Lab tier<select id="lab-tier"><option value="low">Low — cheapest qualifying</option><option value="mid">Mid — more headroom</option><option value="high">High — dedicated servers</option></select></label>
+        </fieldset>
+        <fieldset id="manual" hidden class="grid" style="margin-top:16px">
+          <label>Masters<select id="masters"><option>1</option><option selected>3</option><option>5</option></select></label>
+          <label>Workers<input id="workers" type="number" min="0" max="999" value="3" required></label>
+          <label>Master server type<input id="master-type" placeholder="Cheapest qualifying type" pattern="[a-z0-9\-]+"></label>
+          <label>Worker server type<input id="worker-type" placeholder="Cheapest qualifying type" pattern="[a-z0-9\-]+"></label>
+        </fieldset>
+        <label class="row"><span><input id="autodestroy" type="checkbox" checked>Schedule automatic teardown after the duration</span></label>
+        <small>The script reports whether the host successfully scheduled teardown.</small>
+      </section>
+      <section class="card">
+        <h2>3. Review and start</h2>
+        <p id="effect"></p>
+        <p class="muted">Runs the existing procedure non-interactively. Deploy skips password-based admin creation. Destroy keeps shared snapshots and local install artifacts.</p>
+        <p>Command: <code id="command"></code></p>
+        <label id="confirm-label" for="confirm">Confirm operation</label><input id="confirm" autocomplete="off" required spellcheck="false">
+        <div class="row"><button id="start" type="submit">Start deploy</button><a id="follow-link" href="/">Open live cluster status →</a></div>
+      </section>
+    </fieldset>
+  </form>
+  <p id="message" role="status" aria-live="polite"></p>
+  <section class="card" id="output" hidden><h2>Latest browser operation</h2><p id="job-state"></p><pre id="tail"></pre><small>Operator-only output may include credentials. Full output is in logs/web-CLUSTER.log on the server.</small></section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let token = '', unlocked = false, busy = false, sending = false, polling = false;
+let jobs = {};
+const requestedCluster = new URLSearchParams(location.search).get('cluster');
+const operation = () => document.querySelector('input[name=operation]:checked').value;
+function options() {
+  if (operation() !== 'deploy' || $('cluster').value !== 'legacy') return {};
+  const fields = ['profile','region','release','duration'];
+  if ($('profile').value === '3') fields.push('lab-topology','lab-tier');
+  if ($('profile').value === '4') fields.push('masters','workers','master-type','worker-type');
+  const result = {};
+  for (const key of fields) if ($(key).value.trim()) result[key] = $(key).value.trim();
+  result['no-autodestroy'] = !$('autodestroy').checked;
+  return result;
+}
+function render() {
+  const op = operation(), cluster = $('cluster').value, legacy = cluster === 'legacy';
+  const settings = op === 'deploy' && legacy;
+  $('settings').hidden = !settings;
+  $('settings').querySelectorAll('input,select').forEach(el => el.disabled = !settings);
+  for (const [id, profile] of [['lab','3'],['manual','4']]) {
+    $(id).hidden = !settings || $('profile').value !== profile;
+    $(id).disabled = $(id).hidden;
+  }
+  $('config-note').textContent = legacy ? 'Uses the repository .env and install-config.yaml. Configure credentials on the host before deploying.' : `Uses clusters/${cluster}.yaml and its isolated workspace. Edit that file on the host to change deployment settings.`;
+  const href = '/?cluster=' + encodeURIComponent(cluster);
+  $('status-link').href = href; $('follow-link').href = href;
+  $('effect').textContent = op === 'destroy' ? `Permanently delete the infrastructure and cluster data for ${cluster}.` : op === 'resume' ? `Resume ${cluster} using its recorded configuration and existing credentials.` : `Deploy ${cluster}. This provisions billable cloud resources.`;
+  $('effect').className = op === 'destroy' ? 'danger' : '';
+  const cmd = [`./${op === 'destroy' ? 'destroy' : 'deploy'}-okd.sh`, '--yes'];
+  if (!legacy) cmd.push('--cluster', cluster);
+  if (op === 'resume') cmd.push('--resume');
+  for (const [key,value] of Object.entries(options())) {
+    if (value === true) cmd.push('--' + key);
+    else if (value !== false) cmd.push('--' + key, value);
+  }
+  $('command').textContent = cmd.join(' ');
+  $('confirm-label').textContent = `Type “${op} ${cluster}” to confirm`;
+  $('confirm').placeholder = `${op} ${cluster}`;
+  $('start').textContent = sending ? 'Starting…' : `Start ${op}`;
+  $('start').disabled = !unlocked || busy || sending;
+}
+async function api(path, body) {
+  const r = await fetch(path, {method:body ? 'POST' : 'GET', cache:'no-store',
+    headers:{Authorization:'Bearer ' + token, ...(body ? {'Content-Type':'application/json'} : {})},
+    ...(body ? {body:JSON.stringify(body)} : {})});
+  const result = await r.json();
+  if (!r.ok) throw new Error(result.error || `Request failed (${r.status})`);
+  return result;
+}
+async function refresh() {
+  if (!unlocked || polling) return;
+  polling = true;
+  const cluster = $('cluster').value;
+  try {
+    const data = await api('/control.json'); jobs = data.jobs;
+    const r = await fetch('/status.json?cluster=' + encodeURIComponent(cluster), {cache:'no-store'});
+    if (!r.ok) throw new Error('Could not read cluster status.');
+    const s = await r.json();
+    if (cluster !== $('cluster').value) return;
+    const job = jobs[cluster];
+    busy = !!(job && job.running) || (s.cluster === cluster && s.running);
+    $('cluster-state').textContent = busy ? 'An operation is running. Follow its progress on the status page.' : 'No operation currently running.';
+    $('output').hidden = !job;
+    if (job) {
+      $('job-state').textContent = `${job.operation}: ${job.running ? 'running' : job.exit_code === 0 ? 'completed' : 'failed (exit ' + job.exit_code + ')'}`;
+      $('tail').textContent = job.tail.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+    }
+    render();
+  } catch (e) {
+    busy = true; render();
+    $('cluster-state').textContent = 'Status unavailable; reconnect before starting an operation.';
+    $('message').textContent = e.message;
+  } finally { polling = false; }
+}
+$('access').addEventListener('submit', async e => {
+  e.preventDefault(); token = $('token').value.trim();
+  try {
+    const data = await api('/control.json');
+    const selected = unlocked ? $('cluster').value : requestedCluster;
+    $('cluster').replaceChildren(...data.clusters.map(c => new Option(c === 'legacy' ? 'legacy — repository .env' : c, c)));
+    if (data.clusters.includes(selected)) $('cluster').value = selected;
+    unlocked = true; $('controls').disabled = false; $('access-state').textContent = 'Unlocked';
+    $('message').textContent = ''; busy = true; render(); await refresh();
+  } catch (e) {
+    unlocked = false; $('controls').disabled = true; $('access-state').textContent = 'Locked';
+    $('output').hidden = true; $('tail').textContent = ''; $('message').textContent = e.message;
+  }
+});
+$('operation-form').addEventListener('input', render);
+$('operation-form').addEventListener('change', e => {
+  if (e.target.id === 'cluster' || e.target.name === 'operation') $('confirm').value = '';
+  if (e.target.id === 'cluster') {
+    busy = true; $('output').hidden = true;
+    history.replaceState(null, '', '/manage?cluster=' + encodeURIComponent($('cluster').value));
+    refresh();
+  }
+  render();
+});
+$('operation-form').addEventListener('submit', async e => {
+  e.preventDefault(); if (busy || sending || !unlocked) return;
+  sending = true; render();
+  try {
+    const result = await api('/operations', {cluster:$('cluster').value, operation:operation(), options:options(), confirm:$('confirm').value});
+    busy = true; $('confirm').value = '';
+    $('message').textContent = `${result.operation} started for ${result.cluster}. Use “Open live cluster status” to follow the procedure.`;
+    await refresh();
+  } catch (e) { $('message').textContent = e.message; }
+  finally { sending = false; render(); }
+});
+render(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>
