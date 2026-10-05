@@ -193,6 +193,30 @@ schedule_autodestroy
         self.assertEqual(dev.stdout, '1 worker-asc-dev-abc\n')
         self.assertEqual(legacy.stdout, '')
 
+    def test_destroy_continues_autoscaler_cleanup_when_api_dns_is_unavailable(self):
+        result = self.bash('''
+. "$REPO_ROOT/functions/lifecycle.sh"
+oc() {
+  printf '%s\\n' "$*" >> oc-calls
+  echo 'Unable to connect to the server: dial tcp: lookup api.dev.example.com: no such host' >&2
+  return 1
+}
+stop_cluster_autoscaler_before_destroy
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('continuing with Hetzner autoscaler-node cleanup', result.stderr)
+        self.assertEqual((self.repo / 'oc-calls').read_text(),
+                         '-n cluster-autoscaler get deployment cluster-autoscaler --ignore-not-found -o name\n')
+
+    def test_destroy_stops_autoscaler_on_non_transport_api_errors(self):
+        result = self.bash('''
+. "$REPO_ROOT/functions/lifecycle.sh"
+oc() { echo 'Error from server (Forbidden): deployments is forbidden' >&2; return 1; }
+stop_cluster_autoscaler_before_destroy
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Forbidden', result.stderr)
+
     def test_failed_drain_prevents_terraform_and_node_deletion(self):
         (self.repo / '.env').write_text('TF_VAR_replicas_worker=2\n')
         result = self.bash('''

@@ -107,16 +107,10 @@ log "Removing cluster-autoscaler nodes (not managed by terraform)"
 progress_step destroy "Removing cluster-autoscaler nodes" "<1 min"
 CA_NETID=$(hcloud_list networks | jq -r --arg d "$DOMAIN" '.networks[] | select(.name == $d) | .id')
 CA_NODES=$(ca_node_ids)
-if [ -f .cluster-autoscaler-installed ] || [ -n "$CA_NODES" ]; then
+if [ -n "$CA_NODES" ]; then
   assert_cluster_context || err "cannot verify autoscaler cluster context"
-  CA_DEPLOYMENT=$(oc -n cluster-autoscaler get deployment cluster-autoscaler --ignore-not-found -o name) \
-    || err "could not inspect the autoscaler before teardown"
-  if [ -n "$CA_DEPLOYMENT" ]; then
-    oc -n cluster-autoscaler scale deployment/cluster-autoscaler --replicas=0 \
-      || err "could not stop the autoscaler before deleting its servers"
-    oc -n cluster-autoscaler wait --for=delete pod -l app=cluster-autoscaler --timeout=120s \
-      || err "autoscaler pods did not stop"
-  fi
+  stop_cluster_autoscaler_before_destroy \
+    || err "could not stop or inspect the autoscaler before teardown"
 fi
 if [ -n "$CA_NODES" ]; then
   echo "$CA_NODES" | while read -r id name; do

@@ -142,6 +142,27 @@ ca_node_ids() {
     | "\(.id) \(.name)"'
 }
 
+stop_cluster_autoscaler_before_destroy() {
+  local deployment
+  if deployment=$(oc -n cluster-autoscaler get deployment cluster-autoscaler --ignore-not-found -o name 2>&1); then
+    [ -n "$deployment" ] || return 0
+    oc -n cluster-autoscaler scale deployment/cluster-autoscaler --replicas=0 || return 1
+    oc -n cluster-autoscaler wait --for=delete pod -l app=cluster-autoscaler --timeout=120s || return 1
+    return 0
+  fi
+
+  case "$deployment" in
+    *"no such host"*|*"connection refused"*|*"i/o timeout"*|*"context deadline exceeded"*|*"network is unreachable"*)
+      echo "Cluster API is unreachable; continuing with Hetzner autoscaler-node cleanup" >&2
+      return 0
+      ;;
+    *)
+      printf '%s\n' "$deployment" >&2
+      return 1
+      ;;
+  esac
+}
+
 run_addon() {
   local before=${DEVOPS_NOTE:-} result=0
   "$@" || result=$?
