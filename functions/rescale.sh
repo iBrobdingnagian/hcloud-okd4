@@ -60,17 +60,37 @@ _wait_node_ready() {  # <node> <timeout_s>
 # wait until etcd is healthy again: all control-plane etcd pods Running and the
 # operator no longer Progressing (best-effort)
 _wait_etcd_healthy() {  # <expected-members> <timeout_s>
-  local want=$1 to=${2:-420} t=0 running healthy
-  while [ "$t" -lt "$to" ]; do
+  # settled : <expected> etcd pods Ready, operator Available, not Degraded, not Progressing
+  # rolling : same, but the operator is still rolling a new static-pod revision to
+  #           the masters. Healthy: every new member triggers another rollout and
+  #           1 -> 3 masters easily outlasts the caller's limit, so allow up to
+  #           ETCD_ROLLOUT_MAX seconds in total.
+  # anything else (members missing, Degraded, unavailable) gets the caller's limit.
+  local want=$1 to=${2:-420} max=${ETCD_ROLLOUT_MAX:-1800} t=0 running co state detail
+  [ "$max" -ge "$to" ] || max=$to
+  while :; do
     running=$(oc -n openshift-etcd get pods -l app=etcd -o json 2>/dev/null \
       | jq '[.items[] | select(.status.phase == "Running" and any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length') || running=0
-    healthy=$(oc get clusteroperator etcd -o json 2>/dev/null | jq -r '
-      any(.status.conditions[]; .type == "Available" and .status == "True") and
-      all(.status.conditions[]; (.type != "Degraded" and .type != "Progressing") or .status == "False")') || healthy=false
-    [ "${running:-0}" -ge "$want" ] && [ "$healthy" = true ] && return 0
+    co=$(oc get clusteroperator etcd -o json 2>/dev/null) || co='{}'
+    state=$(printf '%s' "$co" | jq -r --argjson ok "$([ "${running:-0}" -ge "$want" ] && echo true || echo false)" '
+      def c($t): ([.status.conditions[]? | select(.type == $t) | .status][0] // "Unknown");
+      if ($ok and c("Available") == "True" and c("Degraded") == "False") then
+        (if c("Progressing") == "False" then "settled" else "rolling" end)
+      else "waiting" end') || state=waiting
+    [ "$state" = settled ] && return 0
+    if [ "$state" = rolling ] && [ "$t" -ge "$max" ]; then
+      echo "    etcd still rolling out after ${t}s — check: oc get co etcd" >&2; return 1
+    fi
+    if [ "$state" != rolling ] && [ "$t" -ge "$to" ]; then
+      echo "    etcd not healthy after ${t}s: ${running:-0}/$want members Ready — check: oc get co etcd; oc -n openshift-etcd get pods" >&2
+      return 1
+    fi
+    if [ $((t % 60)) -eq 0 ]; then
+      detail=$(printf '%s' "$co" | jq -r '[.status.conditions[]? | select(.type == "Progressing" and .status == "True") | .message][0] // ""' 2>/dev/null)
+      echo "    etcd $state: ${running:-0}/$want members Ready${detail:+ — $detail}"
+    fi
     sleep 10; t=$((t+10))
   done
-  return 1
 }
 
 # run_rescale — rolling in-place server-type change. Reads DOMAIN, HCLOUD_TOKEN,
