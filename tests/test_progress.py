@@ -3,6 +3,7 @@ import fcntl
 import http.client
 import json
 import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -13,6 +14,27 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import progress_server as progress
 from progress_controls import Controls
+
+
+class ProcessTests(unittest.TestCase):
+    def test_process_detection_without_procfs(self):
+        results = [subprocess.CompletedProcess([], 0,
+                       '123 1-02:03:04 bash deploy-okd.sh --cluster lab\n'
+                       '124 00:05 make wait_completion\n'),
+                   subprocess.CompletedProcess([], 0,
+                       'p123\nn/tmp/lab\np124\nn/tmp/lab\n')]
+        with patch.object(progress, '_BOOT', None), \
+                patch.object(progress.subprocess, 'run', side_effect=results), \
+                patch.object(progress.time, 'time', return_value=200000):
+            procs = progress.all_processes()['/tmp/lab']
+        self.assertEqual(procs[0], (123, 106216, 'bash deploy-okd.sh --cluster lab'))
+        self.assertEqual(procs[1], (124, 199995, 'make wait_completion'))
+        self.assertEqual(progress.running_op(procs), ('deploy', 123, 106216))
+
+    def test_missing_process_tools_does_not_break_status(self):
+        with patch.object(progress, '_BOOT', None), \
+                patch.object(progress.subprocess, 'run', side_effect=FileNotFoundError):
+            self.assertEqual(progress.all_processes(), {})
 
 
 class ControlsFixture(unittest.TestCase):

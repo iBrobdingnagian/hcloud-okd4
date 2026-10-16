@@ -86,7 +86,11 @@ STEP_RE = re.compile(r'^Phase (\d+) — (.+)$')
 ELAPSED_RE = re.compile(r'elapsed: (\S+) \| typical duration of this step: (.+)$')
 SECRET_RE = re.compile(r'pass(word|wd)?|token|secret|api[_-]?key|private key|auth', re.I)
 
-_BOOT = next(float(l.split()[1]) for l in open('/proc/stat') if l.startswith('btime'))
+try:
+    with open('/proc/stat') as stream:
+        _BOOT = next(float(l.split()[1]) for l in stream if l.startswith('btime'))
+except (OSError, StopIteration):
+    _BOOT = None
 _TICK = os.sysconf('SC_CLK_TCK')
 _seen = {}  # run pid -> {'index', 'since'}: keeps the inferred step between commands
 
@@ -183,6 +187,8 @@ def workspaces():
 
 def all_processes():
     """{cwd: [(pid, start_epoch, cmdline)]} for every readable process."""
+    if _BOOT is None:
+        return portable_processes()
     out = {}
     for proc in Path('/proc').iterdir():
         if not proc.name.isdigit():
@@ -195,6 +201,40 @@ def all_processes():
         except (OSError, ValueError, IndexError):
             continue
         out.setdefault(cwd, []).append((int(proc.name), start, cmd))
+    return out
+
+
+def portable_processes():
+    """Read process commands and working directories on hosts without procfs."""
+    try:
+        listing = subprocess.run(['ps', '-axo', 'pid=,etime=,command='],
+                                 capture_output=True, text=True, timeout=10, check=True)
+        directories = subprocess.run(['lsof', '-a', '-d', 'cwd', '-Fpn'],
+                                     capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    cwd_by_pid = {}
+    pid = None
+    for line in directories.stdout.splitlines():
+        if line.startswith('p') and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith('n') and pid is not None:
+            cwd_by_pid[pid] = line[1:]
+    out = {}
+    now = time.time()
+    for line in listing.stdout.splitlines():
+        try:
+            pid_text, elapsed, cmd = line.strip().split(None, 2)
+            pid = int(pid_text)
+            days, _, clock = elapsed.rpartition('-')
+            seconds = 0
+            for part in clock.split(':'):
+                seconds = seconds * 60 + int(part)
+            seconds += int(days or 0) * 86400
+        except ValueError:
+            continue
+        if pid in cwd_by_pid:
+            out.setdefault(cwd_by_pid[pid], []).append((pid, now - seconds, cmd))
     return out
 
 
