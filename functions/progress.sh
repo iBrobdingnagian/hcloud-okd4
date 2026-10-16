@@ -3,16 +3,22 @@
 # Sourced by deploy-okd.sh and destroy-okd.sh; not meant to be executed directly.
 #
 # start_progress_server starts scripts/progress_server.py (detached, outlives the
-# run) unless something already listens on PROGRESS_PORT. One server covers all
-# clusters: it follows whichever workspace has a deploy/destroy running.
+# run) unless THIS checkout's server already runs. One server covers all clusters
+# of the checkout: it follows whichever workspace has a deploy/destroy running.
+# A server from another checkout (same code, same port) is never reused — it
+# would show that repository's runs — so ours moves to the next free port.
 # PROGRESS_SERVER=0 disables it; PROGRESS_BIND=127.0.0.1 keeps it local.
 
-PROGRESS_PORT=${PROGRESS_PORT:-8093}
+PROGRESS_PORT=${PROGRESS_PORT:-8094}
 
 start_progress_server() {
   [ "${PROGRESS_SERVER:-1}" = 0 ] && return 0
   command -v python3 >/dev/null 2>&1 || return 0
-  if ! python3 -c "import socket,sys; socket.create_connection(('127.0.0.1', $PROGRESS_PORT), 1)" 2>/dev/null; then
+  local plan
+  plan=$(python3 "$REPO_ROOT/scripts/progress_server.py" --plan-port --port "$PROGRESS_PORT" 2>/dev/null) \
+    || { echo "    (progress page unavailable: no free port from $PROGRESS_PORT)"; return 0; }
+  PROGRESS_PORT=${plan#* }
+  if [ "${plan%% *}" = start ]; then
     mkdir -p "$REPO_ROOT/logs"
     python3 - "$REPO_ROOT" "$PROGRESS_PORT" "${PROGRESS_BIND:-0.0.0.0}" <<'PY'
 import pathlib

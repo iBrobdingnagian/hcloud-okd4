@@ -20,7 +20,7 @@ verify_cluster_health (functions/lifecycle.sh): API /readyz, every
 ClusterOperator Available and not Degraded/Progressing, and every node Ready.
 
 Started automatically by deploy-okd.sh / destroy-okd.sh (functions/progress.sh).
-Usage: scripts/progress_server.py [--port 8093] [--bind 0.0.0.0]
+Usage: scripts/progress_server.py [--port 8094] [--bind 0.0.0.0]
 """
 import argparse
 import json
@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+import urllib.request
 
 from progress_controls import Controls
 
@@ -328,6 +329,7 @@ def status(name, work, procs):
     finished_ok = (not run and last is not None and last.get('operation') == op
                    and last.get('exit_code') == 0)
     return {
+        'repo': str(REPO),  # lets a starter tell this checkout's server from another one
         'cluster': name,
         'clusters': list(workspaces()),
         'operation': op,
@@ -430,11 +432,45 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def fetch_status(port):
+    with urllib.request.urlopen(f'http://127.0.0.1:{port}/status.json', timeout=2) as response:
+        return json.load(response)
+
+
+def port_plan(port, repo=None, fetch=fetch_status, attempts=10):
+    """('reuse', p) when this checkout's server already listens on p, else ('start', p).
+
+    Another checkout's progress server (same code, same default port) must not be
+    reused: it reports its own repository's workspaces, not this one's.
+    """
+    repo = str(repo or REPO)
+    for candidate in range(port, port + attempts):
+        try:
+            answer = fetch(candidate)
+        except ValueError:
+            continue                           # answered, but not with our JSON
+        except OSError as exc:
+            # Only a refused connection means the port is free; an HTTP error or
+            # a timeout means some other program is listening there.
+            reason = getattr(exc, 'reason', exc)
+            if isinstance(reason, ConnectionRefusedError):
+                return 'start', candidate
+            continue
+        if isinstance(answer, dict) and answer.get('repo') == repo:
+            return 'reuse', candidate
+    raise SystemExit(f'no free port in {port}-{port + attempts - 1} for the progress server')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
-    ap.add_argument('--port', type=int, default=8093)
+    ap.add_argument('--port', type=int, default=8094)
     ap.add_argument('--bind', default='0.0.0.0')
+    ap.add_argument('--plan-port', action='store_true',
+                    help='print "reuse PORT" or "start PORT" for this checkout and exit')
     a = ap.parse_args()
+    if a.plan_port:
+        print(*port_plan(a.port))
+        return
     srv = ThreadingHTTPServer((a.bind, a.port), Handler)
     srv.controls = Controls(REPO)
     srv.controls.save_token()

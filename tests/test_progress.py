@@ -37,6 +37,51 @@ class ProcessTests(unittest.TestCase):
             self.assertEqual(progress.all_processes(), {})
 
 
+class PortPlanTests(unittest.TestCase):
+    """A progress server from another checkout must never be reused."""
+
+    def plan(self, answers):
+        def fetch(port):
+            answer = answers.get(port)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return progress.port_plan(8093, repo='/repo/hcloud-okd4', fetch=fetch)
+
+    def test_free_port_starts_our_server(self):
+        self.assertEqual(self.plan({8093: ConnectionRefusedError()}), ('start', 8093))
+
+    def test_our_server_is_reused(self):
+        self.assertEqual(self.plan({8093: {'repo': '/repo/hcloud-okd4'}}), ('reuse', 8093))
+
+    def test_other_checkout_moves_to_next_free_port(self):
+        answers = {8093: {'repo': '/repo/azcloud_ocp'}, 8094: ConnectionRefusedError()}
+        self.assertEqual(self.plan(answers), ('start', 8094))
+
+    def test_server_without_identity_is_treated_as_foreign(self):
+        answers = {8093: {'cluster': 'legacy'}, 8094: ValueError('not json'), 8095: ConnectionRefusedError()}
+        self.assertEqual(self.plan(answers), ('start', 8095))
+
+    def test_our_server_found_on_a_later_port_is_reused(self):
+        answers = {8093: {'repo': '/repo/azcloud_ocp'}, 8094: {'repo': '/repo/hcloud-okd4'}}
+        self.assertEqual(self.plan(answers), ('reuse', 8094))
+
+    def test_port_held_by_another_http_service_is_skipped(self):
+        import urllib.error
+        busy = urllib.error.HTTPError('http://x/status.json', 404, 'not found', {}, None)
+        answers = {8093: busy, 8094: ConnectionRefusedError()}
+        self.assertEqual(self.plan(answers), ('start', 8094))
+
+    def test_listener_that_does_not_answer_is_skipped(self):
+        import urllib.error
+        answers = {8093: urllib.error.URLError(TimeoutError('timed out')), 8094: ConnectionRefusedError()}
+        self.assertEqual(self.plan(answers), ('start', 8094))
+
+    def test_status_reports_the_repository_it_serves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(progress.status('legacy', Path(tmp), [])['repo'], str(progress.REPO))
+
+
 class ControlsFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
