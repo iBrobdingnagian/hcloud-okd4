@@ -193,6 +193,9 @@ apply_scale() {
   export KUBECONFIG=$PWD/ignition/auth/kubeconfig
   assert_cluster_context || return 1
   TOOLBOX=quay.io/slauger/hcloud-okd4:$OPENSHIFT_RELEASE
+  # progress page (functions/progress.sh): the plan and each phase of this scale
+  progress_scale "$CUR_MASTERS" "$CUR_WORKERS" "$NEW_MASTERS" "$NEW_WORKERS" "$DOMAIN"
+  progress_step scale "Preparing the scale: ${CUR_MASTERS}x${CUR_WORKERS} -> ${NEW_MASTERS}x${NEW_WORKERS}" "<1 min"
   if [ "$NEW_MASTERS" -ne "$CUR_MASTERS" ]; then
     _wait_etcd_healthy "$CUR_MASTERS" 420 || { echo "etcd is not healthy; stopping scale" >&2; return 1; }
   fi
@@ -212,6 +215,9 @@ apply_scale() {
   fi
 
   # ── scale-down: drain/remove nodes BEFORE terraform destroys their VMs ──
+  if [ "$NEW_WORKERS" -lt "$CUR_WORKERS" ] || [ "$NEW_MASTERS" -lt "$CUR_MASTERS" ]; then
+    progress_step scale "Draining nodes being removed" "1-10 min"
+  fi
   if [ "$NEW_WORKERS" -lt "$CUR_WORKERS" ]; then
     log "Draining $((CUR_WORKERS - NEW_WORKERS)) worker node(s) before removal"
     for i in $(seq $((NEW_WORKERS + 1)) "$CUR_WORKERS"); do
@@ -258,6 +264,7 @@ apply_scale() {
   load_env
 
   log "Applying infrastructure changes (terraform): $CUR_MASTERS -> $NEW_MASTERS master(s), $CUR_WORKERS -> $NEW_WORKERS worker(s)"
+  progress_step scale "Applying infrastructure changes (terraform): $CUR_MASTERS -> $NEW_MASTERS master(s), $CUR_WORKERS -> $NEW_WORKERS worker(s)" "2-5 min"
   tb "make infrastructure" || return 1
   for role in worker master; do
     if [ "$role" = worker ]; then old=$CUR_WORKERS; new=$NEW_WORKERS
@@ -273,6 +280,7 @@ apply_scale() {
   EXPECTED=$((NEW_MASTERS + NEW_WORKERS))
   if [ "$NEW_MASTERS" -gt "$CUR_MASTERS" ] || [ "$NEW_WORKERS" -gt "$CUR_WORKERS" ]; then
     log "Approving CSRs until all $EXPECTED nodes are Ready"
+    progress_step scale "Joining new nodes: approving CSRs until all $EXPECTED nodes are Ready" "2-15 min"
     tries=0
     while [ $tries -lt 60 ]; do
       oc get csr -o name 2>/dev/null | xargs -r oc adm certificate approve 2>/dev/null || true
@@ -290,9 +298,11 @@ apply_scale() {
   fi
   # keep node roles consistent with the new topology (see functions/scheduling.sh)
   if [ "$NEW_WORKERS" -ne "$CUR_WORKERS" ] && [ "${READY:-0}" -ge "$EXPECTED" ]; then
+    progress_step scale "Updating node roles and router" "1-4 min"
     apply_node_roles "$NEW_WORKERS" || true
   fi
   if [ "$NEW_MASTERS" -ne "$CUR_MASTERS" ]; then
+    progress_step scale "Waiting for etcd: $NEW_MASTERS healthy member(s)" "2-30 min"
     _wait_etcd_healthy "$NEW_MASTERS" 420 || { echo "etcd has not recovered after scaling" >&2; return 1; }
     echo
     echo "    verify etcd membership:"
@@ -300,5 +310,6 @@ apply_scale() {
     echo "      oc -n openshift-etcd get pods"
   fi
   log "Scale complete: $NEW_MASTERS master(s), $NEW_WORKERS worker(s)"
+  progress_step scale "Scale complete: $NEW_MASTERS master(s), $NEW_WORKERS worker(s)" "instant"
   [ "${READY:-0}" -ge "$EXPECTED" ]
 }

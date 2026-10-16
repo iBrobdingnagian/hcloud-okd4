@@ -7,11 +7,13 @@ import subprocess
 from pathlib import Path
 import sys
 import tempfile
+import time
 import threading
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
 import progress_server as progress
 from progress_controls import Controls
 
@@ -80,6 +82,101 @@ class PortPlanTests(unittest.TestCase):
     def test_status_reports_the_repository_it_serves(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(progress.status('legacy', Path(tmp), [])['repo'], str(progress.REPO))
+
+
+class ScaleViewTests(unittest.TestCase):
+    """A scale run (deploy-okd.sh on an existing cluster) is shown as a scale."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.work = Path(self.temp.name)
+        (self.work / 'logs').mkdir()
+
+    def marker(self, op, title, age=0):
+        path = self.work / 'logs/current-step.json'
+        path.write_text(json.dumps({'op': op, 'title': title, 'typical': '2-5 min', 'at': '2026-10-17T00:00:00Z'}))
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+
+    def plan(self):
+        (self.work / 'logs/scale.json').write_text(json.dumps({
+            'direction': 'up', 'from': {'masters': 1, 'workers': 0}, 'to': {'masters': 1, 'workers': 2},
+            'adding': ['worker01.lab.example.com', 'worker02.lab.example.com'], 'removing': []}))
+
+    def test_running_scale_is_reported_with_its_own_steps_and_plan(self):
+        self.marker('scale', 'Applying infrastructure changes (terraform): 1 -> 1 master(s), 0 -> 2 worker(s)')
+        self.plan()
+        result = progress.status('legacy', self.work, [(10, time.time() - 60, 'bash deploy-okd.sh')])
+        self.assertEqual(result['operation'], 'scale')
+        self.assertTrue(result['running'])
+        self.assertEqual(result['steps'][result['current']['index']], 'Applying infrastructure changes')
+        self.assertEqual(result['scale']['to'], {'masters': 1, 'workers': 2})
+        self.assertEqual(result['scale']['adding'], ['worker01.lab.example.com', 'worker02.lab.example.com'])
+
+    def test_install_run_is_still_a_deploy(self):
+        self.marker('deploy', 'Waiting for install completion')
+        result = progress.status('legacy', self.work, [(10, time.time() - 60, 'bash deploy-okd.sh')])
+        self.assertEqual(result['operation'], 'deploy')
+        self.assertIsNone(result['scale'])
+
+    def test_finished_scale_stays_visible_as_complete(self):
+        started = time.time() - 600
+        (self.work / 'logs/last-operation.json').write_text(json.dumps({
+            'cluster': 'legacy', 'operation': 'deploy', 'exit_code': 0,
+            'started': progress.iso(started), 'finished': progress.iso(time.time())}))
+        self.marker('scale', 'Scale complete: 1 master(s), 2 worker(s)', age=30)
+        self.plan()
+        result = progress.status('legacy', self.work, [])
+        self.assertEqual(result['operation'], 'scale')
+        self.assertTrue(result['complete'])
+
+    def test_old_scale_marker_does_not_take_over_a_new_deploy(self):
+        self.marker('scale', 'Scale complete: 1 master(s), 2 worker(s)', age=3600)
+        result = progress.status('legacy', self.work, [(10, time.time() - 60, 'bash deploy-okd.sh')])
+        self.assertEqual(result['operation'], 'deploy')
+
+    def test_members_table_from_node_list(self):
+        nodes = [{
+            'metadata': {'name': 'worker01.lab.example.com', 'creationTimestamp': '2026-10-17T00:01:00Z',
+                         'labels': {'node-role.kubernetes.io/worker': ''}},
+            'spec': {'unschedulable': True},
+            'status': {'conditions': [{'type': 'Ready', 'status': 'True'}],
+                       'addresses': [{'type': 'InternalIP', 'address': '10.0.1.21'}],
+                       'nodeInfo': {'kubeletVersion': 'v1.33.5'}},
+        }, {
+            'metadata': {'name': 'master01.lab.example.com', 'creationTimestamp': '2026-10-16T22:20:00Z',
+                         'labels': {'node-role.kubernetes.io/master': '', 'node-role.kubernetes.io/control-plane': ''}},
+            'spec': {},
+            'status': {'conditions': [{'type': 'Ready', 'status': 'False'}], 'addresses': [], 'nodeInfo': {}},
+        }]
+        members = progress.node_members(nodes)
+        self.assertEqual([m['name'] for m in members], ['master01.lab.example.com', 'worker01.lab.example.com'])
+        self.assertEqual(members[0]['roles'], ['control-plane', 'master'])
+        self.assertFalse(members[0]['ready'])
+        self.assertEqual(members[1], {'name': 'worker01.lab.example.com', 'roles': ['worker'], 'ready': True,
+                                      'schedulable': False, 'created': '2026-10-17T00:01:00Z',
+                                      'ip': '10.0.1.21', 'version': 'v1.33.5'})
+
+    def test_every_scale_step_written_by_the_scripts_is_known_to_the_page(self):
+        import re
+        titles = re.findall(r'progress_step scale "([^"]+)"', (ROOT / 'functions/cluster-scale.sh').read_text())
+        self.assertGreaterEqual(len(titles), 6)
+        for title in titles:
+            self.assertIsNotNone(progress.step_index('scale', title), title)
+
+    def test_shell_helper_records_the_plan_with_node_names(self):
+        script = f'REPO_ROOT={ROOT}; . {ROOT}/functions/progress.sh; progress_scale 3 3 3 1 lab.example.com'
+        subprocess.run(['bash', '-c', script], cwd=self.work, check=True)
+        plan = json.loads((self.work / 'logs/scale.json').read_text())
+        self.assertEqual(plan['direction'], 'down')
+        self.assertEqual(plan['removing'], ['worker02.lab.example.com', 'worker03.lab.example.com'])
+        self.assertEqual(plan['adding'], [])
+        subprocess.run(['bash', '-c', script.replace('3 3 3 1', '1 0 3 2')], cwd=self.work, check=True)
+        plan = json.loads((self.work / 'logs/scale.json').read_text())
+        self.assertEqual(plan['direction'], 'up')
+        self.assertEqual(plan['adding'], ['master02.lab.example.com', 'master03.lab.example.com',
+                                          'worker01.lab.example.com', 'worker02.lab.example.com'])
 
 
 class ControlsFixture(unittest.TestCase):

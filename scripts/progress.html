@@ -47,6 +47,14 @@ select { font: inherit; color: var(--fg); background: var(--card); border: 1px s
 #hproblems li { display: list-item; border: 0; padding: 2px 0; }
 .card h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
 code { font-family: ui-monospace, monospace; font-size: 13px; }
+.skip .dot { background: transparent; border: 2px solid var(--line); }
+.skip .title { color: var(--muted); text-decoration: line-through; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+th, td { padding: 6px 8px 6px 0; border-top: 1px solid var(--line); vertical-align: top; }
+tr:first-child th { border-top: 0; }
+.tag { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff; }
+.muted { color: var(--muted); }
 </style>
 </head>
 <body>
@@ -65,6 +73,11 @@ code { font-family: ui-monospace, monospace; font-size: 13px; }
     <div class="hrow"><span id="hstate" class="badge"></span> <span id="hsummary"></span></div>
     <div class="sub" id="hcounts"></div>
     <ul id="hproblems"></ul>
+  </section>
+  <section class="card" id="memberscard" hidden>
+    <h2>Cluster members <span class="sub" id="mcounts"></span></h2>
+    <table><thead><tr><th>Node</th><th>Roles</th><th>Status</th><th>Age</th><th>IP</th></tr></thead>
+      <tbody id="members"></tbody></table>
   </section>
   <section class="card">
     <h2>Phases</h2>
@@ -100,7 +113,9 @@ function render(s) {
   last = s;
   $('cluster').textContent = s.cluster;
   $('manage').href = '/manage?cluster=' + encodeURIComponent(s.cluster);
-  $('op').textContent = s.operation;
+  const sc = s.operation === 'scale' && s.scale;
+  const topo = t => `${t.masters}x${t.workers}`;
+  $('op').textContent = sc ? `scale-${sc.direction} ${topo(sc.from)} → ${topo(sc.to)}` : s.operation;
   const pick = $('pick');
   pick.hidden = s.clusters.length < 2;
   pick.replaceChildren(new Option('follow active run', ''), ...s.clusters.map(c => new Option(c, c)));
@@ -119,15 +134,22 @@ function render(s) {
   const failed = !s.running && !s.complete && s.last_operation && s.last_operation.operation === s.operation
     && ((con && con.error) || (exit !== null && exit !== undefined && exit !== 0));
 
+  // scale steps that this particular scale never runs (e.g. draining on a scale-up)
+  const skipped = i => sc && (
+    (s.steps[i].startsWith('Draining') && !sc.removing.length) ||
+    (s.steps[i].startsWith('Joining') && !sc.adding.length) ||
+    (s.steps[i].startsWith('Updating node roles') && sc.from.workers === sc.to.workers) ||
+    (s.steps[i].startsWith('Waiting for etcd') && sc.from.masters === sc.to.masters));
   let done = 0;
   $('steps').innerHTML = '';
   s.steps.forEach((title, i) => {
     const ckpt = cp[s.step_checkpoint[i]];
     let cls = 'pending', sub = '';
-    if (s.running) cls = i < curIdx ? 'done' : i === curIdx ? 'run' : 'pending';
+    if (skipped(i) && i !== curIdx) { cls = 'skip'; sub = 'not needed for this scale'; }
+    else if (s.running) cls = i < curIdx ? 'done' : i === curIdx ? 'run' : 'pending';
     else if (i === curIdx && failed) cls = 'fail';
     else if (s.complete || ckpt || i < curIdx) cls = 'done';
-    if (cls === 'done') done++;
+    if (cls === 'done' || cls === 'skip') done++;
     const fromLog = seen.find(x => x.title.startsWith(title));
     if (cls === 'run') {
       sub = 'running' + (cur.since ? ' for <span class="live" data-since="' + cur.since + '"></span>' : '')
@@ -145,11 +167,12 @@ function render(s) {
   $('bar').style.width = pct + '%';
 
   renderHealth(s);
+  renderMembers(s);
   const h = s.health;
   const sick = h && (h.state === 'degraded' || h.state === 'down');
   const [label, color] = s.running ? [`running · step ${curIdx + 1}/${s.steps.length}`, 'var(--run)']
     : failed ? ['failed', 'var(--bad)']
-    : done === s.steps.length && s.operation === 'deploy' && sick ? ['complete · cluster unhealthy', 'var(--bad)']
+    : done === s.steps.length && s.operation !== 'destroy' && sick ? ['complete · cluster unhealthy', 'var(--bad)']
     : done === s.steps.length ? ['complete', 'var(--ok)'] : ['idle', 'var(--idle)'];
   $('state').textContent = label;
   $('state').style.background = color;
@@ -159,8 +182,8 @@ function render(s) {
   $('err').textContent = errText || '';
 
   $('tail').hidden = !con;
-  $('nolog').hidden = !!con || s.operation !== 'deploy';
-  $('tail').parentElement.hidden = s.operation !== 'deploy';
+  $('nolog').hidden = !!con || s.operation === 'destroy';
+  $('tail').parentElement.hidden = s.operation === 'destroy';
   if (con) {
     const pre = $('tail');
     const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
@@ -180,12 +203,14 @@ function renderHealth(s) {
   $('healthcard').hidden = !h;
   if (!h) return;
   // while a deploy is still installing, an unreachable API or busy operators are expected
-  const installing = s.running && s.operation === 'deploy' && (h.state === 'down' || h.state === 'degraded');
-  const [label, color] = installing ? ['installing', 'var(--run)'] : (HEALTH[h.state] || HEALTH.unknown);
+  // a scale moves the router and restarts control-plane pods: busy operators are expected
+  const busy = s.running && s.operation !== 'destroy' && (h.state === 'down' || h.state === 'degraded');
+  const [label, color] = busy ? [s.operation === 'scale' ? 'scaling' : 'installing', 'var(--run)']
+    : (HEALTH[h.state] || HEALTH.unknown);
   $('hstate').textContent = label;
   $('hstate').style.background = color;
   $('hsummary').textContent = h.summary + (h.detail ? ' — ' + h.detail : '');
-  $('hchecked').textContent = '· checked ' + new Date(h.checked).toLocaleTimeString() + ', every 30 s';
+  $('hchecked').textContent = '· checked ' + new Date(h.checked).toLocaleTimeString() + ', every 15 s';
   $('hcounts').textContent = h.nodes !== undefined
     ? `nodes Ready ${h.nodes_ready}/${h.nodes} · operators available ${h.operators_ok}/${h.operators}`
       + (h.progressing && h.progressing.length ? ` · progressing: ${h.progressing.join(', ')}` : '')
@@ -193,6 +218,53 @@ function renderHealth(s) {
   $('hproblems').replaceChildren(...(h.problems || []).map(p => {
     const li = document.createElement('li'); li.textContent = p; return li;
   }));
+}
+
+const MEMBER = {
+  ready: ['Ready', 'var(--ok)'], notready: ['NotReady', 'var(--bad)'], draining: ['Draining', 'var(--run)'],
+  removing: ['Removing', 'var(--bad)'], removed: ['Removed', 'var(--idle)'],
+  joining: ['Joining', 'var(--run)'], waiting: ['Waiting to join', 'var(--idle)'],
+};
+// one row per node from the health check, plus nodes a scale is still adding or has removed
+function renderMembers(s) {
+  const h = s.health, sc = s.operation === 'scale' && s.scale;
+  const nodes = (h && h.members) || [];
+  $('memberscard').hidden = !nodes.length && !sc;
+  if ($('memberscard').hidden) return;
+  const adding = new Set(sc ? sc.adding : []), removing = new Set(sc ? sc.removing : []);
+  const known = new Set(nodes.map(n => n.name));
+  const rows = nodes.map(n => {
+    let state = n.ready ? (n.schedulable ? 'ready' : 'draining') : (adding.has(n.name) ? 'joining' : 'notready');
+    if (removing.has(n.name)) state = n.schedulable ? 'removing' : 'draining';
+    return { ...n, state, isNew: adding.has(n.name) };
+  });
+  for (const name of adding) if (!known.has(name))
+    rows.push({ name, roles: [name.startsWith('master') ? 'master' : 'worker'], state: s.running ? 'waiting' : 'notready', isNew: true });
+  for (const name of removing) if (!known.has(name))
+    rows.push({ name, roles: [name.startsWith('master') ? 'master' : 'worker'], state: 'removed' });
+  $('members').replaceChildren(...rows.map(r => {
+    const tr = document.createElement('tr');
+    const [label, color] = MEMBER[r.state];
+    const cells = [r.name, (r.roles || []).join(', ') || '—', '', r.created ? dur(r.created) : '—', r.ip || '—'];
+    cells.forEach((text, i) => {
+      const td = document.createElement('td');
+      if (i === 2) {
+        td.innerHTML = '<span class="tag"></span>';
+        td.firstChild.textContent = label;
+        td.firstChild.style.background = color;
+        if (r.isNew) td.insertAdjacentHTML('beforeend', ' <span class="sub">new</span>');
+      } else {
+        td.textContent = text;
+        if (i > 2) td.className = 'muted';
+      }
+      if (r.state === 'removed') td.classList.add('muted');
+      tr.appendChild(td);
+    });
+    return tr;
+  }));
+  const ready = nodes.filter(n => n.ready).length;
+  $('mcounts').textContent = `· ${ready}/${nodes.length} Ready`
+    + (sc ? ` · target ${sc.to.masters} master(s), ${sc.to.workers} worker(s)` : '');
 }
 
 // live counters tick every second between the 5 s status polls

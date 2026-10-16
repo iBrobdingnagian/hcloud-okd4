@@ -50,3 +50,25 @@ progress_step() {
     --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" '{op:$op, title:$title, typical:$typical, at:$at}' \
     > logs/current-step.json 2>/dev/null || true
 }
+
+# progress_scale <cur-masters> <cur-workers> <new-masters> <new-workers> <domain>
+# Records a scale plan for the progress page (logs/scale.json): from/to topology
+# and the exact nodes being added or removed (names follow terraform: role%02d.domain).
+progress_scale() {
+  local cm=$1 cw=$2 nm=$3 nw=$4 domain=$5 role old new i direction=change
+  local adding=() removing=()
+  for role in master worker; do
+    if [ "$role" = master ]; then old=$cm new=$nm; else old=$cw new=$nw; fi
+    i=$((old + 1)); while [ "$i" -le "$new" ]; do adding+=("$(printf '%s%02d.%s' "$role" "$i" "$domain")"); i=$((i + 1)); done
+    i=$((new + 1)); while [ "$i" -le "$old" ]; do removing+=("$(printf '%s%02d.%s' "$role" "$i" "$domain")"); i=$((i + 1)); done
+  done
+  if [ $((nm + nw)) -gt $((cm + cw)) ]; then direction=up
+  elif [ $((nm + nw)) -lt $((cm + cw)) ]; then direction=down; fi
+  mkdir -p logs
+  jq -n --arg direction "$direction" --argjson cm "$cm" --argjson cw "$cw" --argjson nm "$nm" --argjson nw "$nw" \
+    --argjson adding "$(jq -n '$ARGS.positional' --args ${adding[@]+"${adding[@]}"})" \
+    --argjson removing "$(jq -n '$ARGS.positional' --args ${removing[@]+"${removing[@]}"})" \
+    --arg at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{direction:$direction, from:{masters:$cm, workers:$cw}, to:{masters:$nm, workers:$nw},
+      adding:$adding, removing:$removing, started:$at}' > logs/scale.json 2>/dev/null || true
+}

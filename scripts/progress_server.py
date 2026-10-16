@@ -65,6 +65,17 @@ OPERATIONS = {
         ('Destroying infrastructure with terraform', '2-5 min', None),
         ('Cleaning up local state', 'instant', None),
     ],
+    # deploy-okd.sh on an existing cluster (functions/cluster-scale.sh); steps that
+    # do not apply to a run (e.g. draining on a scale-up) are passed over
+    'scale': [
+        ('Preparing the scale', '<1 min (etcd check when masters change)', None),
+        ('Draining nodes being removed', 'scale-down only, 1-10 min', None),
+        ('Applying infrastructure changes', '2-5 min', None),
+        ('Joining new nodes', 'scale-up only, 2-15 min', None),
+        ('Updating node roles and router', '1-4 min', None),
+        ('Waiting for etcd', 'master changes only, 2-30 min (revision rollouts)', None),
+        ('Scale complete', 'instant', None),
+    ],
 }
 SCRIPTS = {'deploy-okd.sh': 'deploy', 'destroy-okd.sh': 'destroy'}
 # command fragments in the run's child processes that identify a step
@@ -78,6 +89,7 @@ MARKERS = {
         ('helm ', 10),
     ],
     'destroy': [('make destroy', 3)],
+    'scale': [('make infrastructure', 2), ('certificate approve', 3)],
 }
 CHECKPOINTS = ['configured', 'ignition', 'image', 'bootstrap-complete',
                'bootstrap-removed', 'installed', 'ready']
@@ -96,7 +108,7 @@ _TICK = os.sysconf('SC_CLK_TCK')
 _seen = {}  # run pid -> {'index', 'since'}: keeps the inferred step between commands
 
 
-HEALTH_INTERVAL = 30
+HEALTH_INTERVAL = 15
 _health = {}  # workspace name -> latest health result
 _health_lock = threading.Lock()
 
@@ -145,6 +157,7 @@ def check_health(work):
             elif _cond(co, 'Progressing') == 'True':
                 progressing.append(name)
         nodes = json.loads(_oc(kubeconfig, 'get', 'nodes', '-o', 'json'))['items']
+        result['members'] = node_members(nodes)
         not_ready = [n['metadata']['name'] for n in nodes if _cond(n, 'Ready') != 'True']
         problems += [f'node {n} not ready' for n in not_ready]
     except Exception as e:  # noqa: BLE001
@@ -159,6 +172,31 @@ def check_health(work):
     else:
         result.update(state='healthy', summary='API ready, all operators available, all nodes Ready')
     return result
+
+
+def node_members(nodes):
+    """Cluster members for the page: one row per node, masters first."""
+    members = []
+    for n in nodes:
+        meta, spec, st = n.get('metadata', {}), n.get('spec', {}), n.get('status', {})
+        roles = sorted(k.split('/', 1)[1] for k in meta.get('labels', {})
+                       if k.startswith('node-role.kubernetes.io/'))
+        address = {a.get('type'): a.get('address') for a in st.get('addresses', [])}
+        members.append({
+            'name': meta.get('name'), 'roles': roles, 'ready': _cond(n, 'Ready') == 'True',
+            'schedulable': not spec.get('unschedulable', False),
+            'created': meta.get('creationTimestamp'),
+            'ip': address.get('InternalIP') or address.get('ExternalIP'),
+            'version': st.get('nodeInfo', {}).get('kubeletVersion'),
+        })
+    return sorted(members, key=lambda m: ('master' not in m['roles'], m['name'] or ''))
+
+
+def _epoch(value):
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return 0
 
 
 def health_loop():
@@ -288,11 +326,17 @@ def status(name, work, procs):
                     if (work / '.phases' / c).is_file() else None} for c in CHECKPOINTS]
     done_cps = {c['name'] for c in checkpoints if c['at']}
 
+    scale_marker = bool(marker and marker.get('op') == 'scale')
     if run:
         op, pid, started = run
+        # a scale is deploy-okd.sh on an existing cluster: its own marker says so
+        if op == 'deploy' and scale_marker and marker_at >= started - 1:
+            op = 'scale'
     else:
         op = (last or {}).get('operation') or (marker or {}).get('op') or 'deploy'
         op = op if op in OPERATIONS else 'deploy'
+        if op == 'deploy' and scale_marker and marker_at >= _epoch((last or {}).get('started')) - 1:
+            op = 'scale'
         pid, started = None, None
     steps = OPERATIONS[op]
 
@@ -326,8 +370,9 @@ def status(name, work, procs):
                    'typical': steps[cur['index']][1],
                    'since': iso(cur['since']) if cur['since'] else None, 'source': 'processes'}
 
-    finished_ok = (not run and last is not None and last.get('operation') == op
-                   and last.get('exit_code') == 0)
+    # scale runs are recorded as a deploy by cluster_context.py
+    finished_ok = (not run and last is not None and last.get('exit_code') == 0
+                   and last.get('operation') == ('deploy' if op == 'scale' else op))
     return {
         'repo': str(REPO),  # lets a starter tell this checkout's server from another one
         'cluster': name,
@@ -342,6 +387,7 @@ def status(name, work, procs):
         'step_checkpoint': [s[2] for s in steps],
         'checkpoints': checkpoints,
         'last_operation': last,
+        'scale': read_json(work / 'logs' / 'scale.json') if op == 'scale' else None,
         'health': _health.get(name),
         'console': read_console(work / 'logs' / 'deploy-console.log') if op == 'deploy' else None,
     }

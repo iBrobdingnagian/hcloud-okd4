@@ -30,6 +30,11 @@ ignition = module('validate_ignition')
 
 class ClusterTests(unittest.TestCase):
     def setUp(self):
+        # Scripts under test must never start a real progress server: it would
+        # outlive the test, bound to a port, serving a deleted temp directory.
+        quiet = patch.dict(os.environ, {'PROGRESS_SERVER': '0'})
+        quiet.start()
+        self.addCleanup(quiet.stop)
         self.temp = tempfile.TemporaryDirectory(prefix='okd-test-')
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
