@@ -120,7 +120,7 @@ SonarQube (code scan) ─▶ Jenkins ─(kaniko build)→ Harbor ─(Trivy image
 
 The pipeline includes a **SonarQube analysis** stage (if SonarQube is installed) and a
 **Trivy image-scan report** after the push — both report-only (they log results, don't
-fail the build). See **[SCANNING.md](SCANNING.md)** for image-vs-code scanning details.
+fail the build). See **[SCANNING.md](../SCANNING.md)** for image-vs-code scanning details.
 
 What the installer wires up:
 - **GitLab** repo `root/app-config` seeded with a tiny Helm chart whose `values.yaml`

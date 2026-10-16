@@ -1,7 +1,7 @@
 # Service mesh & tracing UIs — Istio, Kiali, Jaeger
 
 This covers the mesh/observability-UI tools and the mesh **app showcases** that tie them
-together. They build on the existing observability stack ([SCANNING.md](SCANNING.md)
+together. They build on the existing observability stack ([SCANNING.md](../SCANNING.md)
 covers scanning; [ARCHITECTURE.md](ARCHITECTURE.md) is the big picture).
 
 ## What each adds (and the overlaps)

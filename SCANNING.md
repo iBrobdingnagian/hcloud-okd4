@@ -88,7 +88,7 @@ SonarQube analysis (code) ─▶ kaniko build ─▶ push to Harbor ─▶ Trivy
 ```
 
 Both scan steps are **report-only** (they log results; they don't fail the build). See
-[APPSIM.md](APPSIM.md) for the full loop. Trigger a run:
+[APPSIM.md](readme/APPSIM.md) for the full loop. Trigger a run:
 
 ```bash
 oc -n jenkins start-build appsim-pipeline   # watch the SonarQube + Trivy stages in the log

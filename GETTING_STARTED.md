@@ -138,8 +138,10 @@ TF_VAR_dns_zone_id=paste-your-zone-id-here
 You can ignore the rest of the file — the deploy script fills in the topology,
 region, server types and release for you based on the profile you pick. ✅
 
-> 🔒 `.env` is git-ignored, so your secrets never get committed. The SSH key
-> (`okd4_new_id_rsa`) needed to reach the nodes already ships with the repo.
+> 🔒 `.env` is git-ignored, so your secrets never get committed. Put the SSH key
+> pair that reaches the nodes in `.secrets/okd4_new_id_rsa` and
+> `.secrets/okd4_new_id_rsa.pub` (`.secrets/` is git-ignored too). Its public key
+> must be registered in your Hetzner project and set as `sshKey` in `install-config.yaml`.
 
 ---
 

@@ -18,22 +18,22 @@ This setup is suitable for small test environments only. Not recommended for pro
 
 ## Documentation
 
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — how everything fits together and what every
+- **[ARCHITECTURE.md](readme/ARCHITECTURE.md)** — how everything fits together and what every
   component does (start here for the big picture).
 - [GETTING_STARTED.md](GETTING_STARTED.md) — first run.
-- [MULTICLUSTER.md](MULTICLUSTER.md) — separate cluster configurations, state, planning, and recovery.
-- [APPSIM.md](APPSIM.md) — the real-world application simulations (GitOps, CI/CD, Kafka, AWX).
+- [MULTICLUSTER.md](readme/MULTICLUSTER.md) — separate cluster configurations, state, planning, and recovery.
+- [APPSIM.md](readme/APPSIM.md) — the real-world application simulations (GitOps, CI/CD, Kafka, AWX).
 - [SCANNING.md](SCANNING.md) — image (Harbor/Trivy) + code (SonarQube) scanning.
-- [MESH.md](MESH.md) — service mesh & tracing UIs (Istio, Kiali, Jaeger) + the mesh showcase.
-- [CICD.md](CICD.md) — the appsim-cicd CI engines (Jenkins vs GitLab CI).
-- [AFFINITY.md](AFFINITY.md) — scheduling: affinity/anti-affinity and draining nodes.
+- [MESH.md](readme/MESH.md) — service mesh & tracing UIs (Istio, Kiali, Jaeger) + the mesh showcase.
+- [CICD.md](readme/CICD.md) — the appsim-cicd CI engines (Jenkins vs GitLab CI).
+- [AFFINITY.md](readme/AFFINITY.md) — scheduling: affinity/anti-affinity and draining nodes.
 
 ---
 
 ## Automated Deploy / Destroy
 
 For multiple independent clusters, use `--cluster NAME` with `clusters/NAME.yaml`.
-Start with `clusters/dev.yaml.example`; see [MULTICLUSTER.md](MULTICLUSTER.md).
+Start with `clusters/dev.yaml.example`; see [MULTICLUSTER.md](readme/MULTICLUSTER.md).
 `--plan` previews a named cluster, and `--resume` continues an interrupted installation
 without regenerating its credentials. Commands without `--cluster` retain the
 original single-cluster working directory.

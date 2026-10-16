@@ -4,10 +4,10 @@ This document explains **what every component does** and **how they fit together
 bare Hetzner Cloud up to a full CI/CD + GitOps + observability + security-scanning
 platform. It's the map; the other docs are the detail:
 
-- [README.md](README.md) — deploy/destroy usage, flags, profiles, scaling
-- [GETTING_STARTED.md](GETTING_STARTED.md) — first run
+- [README.md](../README.md) — deploy/destroy usage, flags, profiles, scaling
+- [GETTING_STARTED.md](../GETTING_STARTED.md) — first run
 - [APPSIM.md](APPSIM.md) — the real-world application simulations
-- [SCANNING.md](SCANNING.md) — image (Harbor/Trivy) + code (SonarQube) scanning
+- [SCANNING.md](../SCANNING.md) — image (Harbor/Trivy) + code (SonarQube) scanning
 - [MESH.md](MESH.md) — service mesh & tracing UIs (Istio, Kiali, Jaeger) + the mesh showcase
 - [CICD.md](CICD.md) — the appsim-cicd CI engines (Jenkins vs GitLab CI)
 - [AFFINITY.md](AFFINITY.md) — scheduling: affinity/anti-affinity + draining nodes
@@ -162,7 +162,7 @@ connects almost everything:
 
 1. **Jenkins** runs the pipeline; **SonarQube** scans the source (SAST, report-only).
 2. **kaniko** builds the image and pushes to **Harbor**; **Trivy** auto-scans it on push
-   (report-only — see [SCANNING.md](SCANNING.md)).
+   (report-only — see [SCANNING.md](../SCANNING.md)).
 3. The pipeline bumps the image tag in a Helm chart stored in **GitLab**.
 4. **ArgoCD** sees the Git change and **syncs** the new version into the cluster.
 5. The running app is **observed** via the monitoring/observability stack.
