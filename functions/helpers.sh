@@ -23,6 +23,15 @@ step() {  # step "<title>" "<typical duration>"
   progress_step deploy "$1" "$2"   # functions/progress.sh
 }
 
+# Node SSH key, relative to the workspace. Named clusters get a copy in their
+# work directory (scripts/cluster_context.py); the legacy single cluster reads
+# it from .secrets/ so no key ever sits in the repository root.
+if [ -n "${CLUSTER_ID:-}" ]; then
+  SSH_KEY_FILE=okd4_new_id_rsa
+else
+  SSH_KEY_FILE=.secrets/okd4_new_id_rsa
+fi
+
 # All make targets run inside the toolbox. --dns 1.1.1.1 bypasses Docker
 # Desktop's resolver, which negative-caches our DNS records after a
 # destroy/recreate cycle.
@@ -42,7 +51,7 @@ tb() {
   # target) — pinned here too so a multi-arch registry manifest can never
   # cause docker to pick the wrong layer on an Apple Silicon host.
   docker run --rm --platform=linux/amd64 --dns 1.1.1.1 --env-file .env \
-    -e ANSIBLE_PRIVATE_KEY_FILE=/workspace/okd4_new_id_rsa \
+    -e ANSIBLE_PRIVATE_KEY_FILE="/workspace/$SSH_KEY_FILE" \
     -e TF_CLI_ARGS_apply=-auto-approve \
     -v "$PWD":/workspace -w /workspace "$TOOLBOX" \
     bash -c "$*; rc=\$?; chown -R $(id -u):$(id -g) /workspace; exit \$rc"

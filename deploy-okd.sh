@@ -598,7 +598,7 @@ cat <<SUMMARY
   Password    : $CRED_PASS
 
   CLI         : export KUBECONFIG="$PWD/ignition/auth/kubeconfig"
-  SSH         : ssh -i "$PWD/okd4_new_id_rsa" core@<node-ip>
+  SSH         : ssh -i "$PWD/$SSH_KEY_FILE" core@<node-ip>
 
   $AUTODESTROY_NOTE
   $MONITORING_NOTE${DEVOPS_NOTE:+

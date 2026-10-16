@@ -14,12 +14,23 @@ start_progress_server() {
   command -v python3 >/dev/null 2>&1 || return 0
   if ! python3 -c "import socket,sys; socket.create_connection(('127.0.0.1', $PROGRESS_PORT), 1)" 2>/dev/null; then
     mkdir -p "$REPO_ROOT/logs"
-    nohup setsid python3 "$REPO_ROOT/scripts/progress_server.py" \
-      --port "$PROGRESS_PORT" --bind "${PROGRESS_BIND:-0.0.0.0}" \
-      >"$REPO_ROOT/logs/progress-server.log" 2>&1 </dev/null &
+    python3 - "$REPO_ROOT" "$PROGRESS_PORT" "${PROGRESS_BIND:-0.0.0.0}" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+root = pathlib.Path(sys.argv[1])
+with (root / 'logs/progress-server.log').open('ab') as log:
+    subprocess.Popen(
+        [sys.executable, str(root / 'scripts/progress_server.py'),
+         '--port', sys.argv[2], '--bind', sys.argv[3]],
+        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        start_new_session=True,
+    )
+PY
   fi
   local host
-  host=$(hostname -I 2>/dev/null | awk '{print $1}')
+  host=$(hostname -I 2>/dev/null | awk '{print $1}') || host=""
   printf '\033[0;36m    live progress: http://%s:%s/\033[0m\n' "${host:-localhost}" "$PROGRESS_PORT"
   printf '\033[0;36m    deploy / destroy controls: http://%s:%s/manage\033[0m\n' "${host:-localhost}" "$PROGRESS_PORT"
   printf '    control token (on this host): %s/logs/progress-control-token\n' "$REPO_ROOT"

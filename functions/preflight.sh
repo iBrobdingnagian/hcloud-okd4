@@ -58,6 +58,6 @@ if command -v nc >/dev/null && ! nc -z -w 5 github.com 22 >/dev/null 2>&1; then
   SSH22_BLOCKED=1
   log "WARNING: outbound tcp/22 is blocked on this network — the CoreOS image cannot be (re)built; only snapshot reuse will work"
 fi
-[ -f okd4_new_id_rsa ]       || err "SSH private key not found in the selected cluster workspace"
-chmod 600 okd4_new_id_rsa
+[ -f "$SSH_KEY_FILE" ]       || err "SSH private key not found: $PWD/$SSH_KEY_FILE"
+chmod 600 "$SSH_KEY_FILE"
 }
