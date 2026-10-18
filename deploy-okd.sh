@@ -25,6 +25,17 @@ Usage: ./deploy-okd.sh [options]
                     (combine only with --cluster; creates no cloud resources)
   --terraform-plan  show a Terraform resource diff using existing ignition/image
   --resume          resume interrupted installation, preserving ignition and state
+  --snapshot-before-destroy  snapshot all node disks before manual/automatic teardown
+                    (retains snapshots and original Primary IPs; both remain billable)
+  --no-snapshot-before-destroy  disable this workspace's saved snapshot preference
+  --snapshot-list   list local cluster snapshot sets and their completion status
+  --snapshot-cloud-list  list existing Hetzner snapshots and local recording status
+  --snapshot-import-template FILE  create a review JSON file for existing node snapshots
+  --snapshot-import-plan FILE  validate an import review file (read-only)
+  --snapshot-import FILE  record reviewed existing snapshots after confirmation;
+                    needs original state, configuration, artifacts and retained IPs
+  --restore-snapshot ID  recreate this same cluster from a completed snapshot set;
+                    keeps original node IPs and credentials; no fresh installation
   --region X        Hetzner location (e.g. nbg1, fsn1, hel1, ash, hil, sin)
   --profile N       deployment profile (skips the interactive menu):
                       1 = Production - Best Servers (3 masters / 3 workers,
@@ -136,12 +147,24 @@ FLAG_DEVOPS=0 FLAG_DEVOPS_COMPONENTS="" FLAG_STORAGE_BACKEND=""
 FLAG_RESCALE=0 FLAG_RESCALE_ROLE="" FLAG_RESCALE_TYPE=""
 FLAG_CA=0 FLAG_CA_TYPE="" FLAG_CA_MIN="" FLAG_CA_MAX="" FLAG_CA_SMOKE=0
 FLAG_RESUME=0 FLAG_TERRAFORM_PLAN=0
+FLAG_SNAPSHOT_BEFORE_DESTROY=0 FLAG_RESTORE_SNAPSHOT="" FLAG_SNAPSHOT_LIST=0
+FLAG_NO_SNAPSHOT_BEFORE_DESTROY=0
+FLAG_SNAPSHOT_CLOUD_LIST=0 FLAG_SNAPSHOT_IMPORT_TEMPLATE="" FLAG_SNAPSHOT_IMPORT_PLAN="" FLAG_SNAPSHOT_IMPORT=""
+SNAPSHOT_ORIGINAL_ARGS=("$@")
 FLAG_LETSENCRYPT=0 FLAG_LE_PROD=0 FLAG_LE_EMAIL="" LETSENCRYPT_NOTE=""
 FLAG_NEW_MASTER_TYPE="" FLAG_NEW_WORKER_TYPE=""
 FLAG_DEFCON="" FLAG_DEFCON_ID=""
 VERSION_POLICY="${VERSION_POLICY:-n-2}"   # operator version policy: n-2 | latest
 while [ $# -gt 0 ]; do
   case "$1" in
+    --snapshot-before-destroy) FLAG_SNAPSHOT_BEFORE_DESTROY=1; shift ;;
+    --no-snapshot-before-destroy) FLAG_NO_SNAPSHOT_BEFORE_DESTROY=1; shift ;;
+    --snapshot-list) FLAG_SNAPSHOT_LIST=1; shift ;;
+    --snapshot-cloud-list) FLAG_SNAPSHOT_CLOUD_LIST=1; shift ;;
+    --snapshot-import-template) FLAG_SNAPSHOT_IMPORT_TEMPLATE=${2:?--snapshot-import-template needs a file}; shift 2 ;;
+    --snapshot-import-plan) FLAG_SNAPSHOT_IMPORT_PLAN=${2:?--snapshot-import-plan needs a file}; shift 2 ;;
+    --snapshot-import) FLAG_SNAPSHOT_IMPORT=${2:?--snapshot-import needs a file}; shift 2 ;;
+    --restore-snapshot) FLAG_RESTORE_SNAPSHOT=${2:?--restore-snapshot needs a snapshot ID}; shift 2 ;;
     --resume)         FLAG_RESUME=1; shift ;;
     --terraform-plan) FLAG_TERRAFORM_PLAN=1; shift ;;
     --plan)           err "--plan requires --cluster NAME" ;;
@@ -199,10 +222,45 @@ while [ $# -gt 0 ]; do
 done
 
 validate_deploy_flags
+[ "$FLAG_SNAPSHOT_BEFORE_DESTROY$FLAG_NO_SNAPSHOT_BEFORE_DESTROY" != 11 ] || err "choose one snapshot preference"
+if [ "$FLAG_SNAPSHOT_LIST" = 1 ]; then
+  [ "${#SNAPSHOT_ORIGINAL_ARGS[@]}" = 1 ] || err "combine --snapshot-list only with --cluster"
+  python3 "$REPO_ROOT/scripts/cluster_snapshot.py" list
+  exit 0
+fi
+if [ "$FLAG_SNAPSHOT_CLOUD_LIST" = 1 ] || [ -n "$FLAG_SNAPSHOT_IMPORT_TEMPLATE$FLAG_SNAPSHOT_IMPORT_PLAN$FLAG_SNAPSHOT_IMPORT" ]; then
+  # Management commands never start deployment or inherit deployment overrides.
+  if [ "$FLAG_SNAPSHOT_CLOUD_LIST" = 1 ]; then
+    [ "${#SNAPSHOT_ORIGINAL_ARGS[@]}" = 1 ] || err "combine --snapshot-cloud-list only with --cluster"
+    load_env
+    python3 "$REPO_ROOT/scripts/cluster_snapshot.py" discover
+  else
+    [ "${#SNAPSHOT_ORIGINAL_ARGS[@]}" = 2 ] || err "combine an import command only with its review file and --cluster"
+    load_env
+    if [ -n "$FLAG_SNAPSHOT_IMPORT_TEMPLATE" ]; then
+      python3 "$REPO_ROOT/scripts/cluster_snapshot.py" import-template "$FLAG_SNAPSHOT_IMPORT_TEMPLATE"
+    elif [ -n "$FLAG_SNAPSHOT_IMPORT_PLAN" ]; then
+      python3 "$REPO_ROOT/scripts/cluster_snapshot.py" import-plan "$FLAG_SNAPSHOT_IMPORT_PLAN"
+    else
+      python3 "$REPO_ROOT/scripts/cluster_snapshot.py" import "$FLAG_SNAPSHOT_IMPORT"
+    fi
+  fi
+  exit 0
+fi
 start_progress_server   # functions/progress.sh
 load_env
 DOMAIN=${TF_VAR_dns_domain:?TF_VAR_dns_domain is required}
 export KUBECONFIG="$PWD/ignition/auth/kubeconfig"
+if [ "$FLAG_SNAPSHOT_BEFORE_DESTROY" = 1 ]; then
+  (umask 077; : > .snapshot-before-destroy)
+fi
+if [ "$FLAG_NO_SNAPSHOT_BEFORE_DESTROY" = 1 ]; then
+  rm -f .snapshot-before-destroy
+fi
+if [ -n "$FLAG_RESTORE_SNAPSHOT" ]; then
+  restore_cluster_snapshot "${SNAPSHOT_ORIGINAL_ARGS[@]}"
+  exit 0
+fi
 if [ "$FLAG_TERRAFORM_PLAN" = 1 ]; then
   infrastructure_plan
   exit 0

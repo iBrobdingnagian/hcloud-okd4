@@ -55,15 +55,51 @@ th, td { padding: 6px 8px 6px 0; border-top: 1px solid var(--line); vertical-ali
 tr:first-child th { border-top: 0; }
 .tag { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff; }
 .muted { color: var(--muted); }
+/* Shared visual direction with the deployment workbench. */
+:root { color-scheme:dark; --bg:#0b1220; --card:#131f32; --fg:#e8f0fb; --muted:#a3b4cb; --line:#293a52; --ok:#5ce1b9; --run:#65cfff; --bad:#ff8494; --idle:#63758d; --code:#0a1424; }
+body { background:radial-gradient(ellipse at 85% 0%,#173346 0%,transparent 45%),var(--bg); min-height:100vh; }
+main { max-width:1160px; padding:36px 24px 64px; }
+header { gap:12px 20px; } h1 { font-size:clamp(24px,4vw,36px); letter-spacing:-.04em; }
+a { color:var(--run); text-underline-offset:4px; }
+.card { border-radius:18px; padding:24px; box-shadow:0 14px 40px #0002; }
+.card h2 { letter-spacing:.12em; font-size:12px; }
+.badge { padding:5px 12px; color:#081420; } .tag { color:#081420; }
+.bar { height:10px; margin:24px 0; border-radius:20px; }
+.bar>div { background:linear-gradient(90deg,var(--run),var(--ok)); box-shadow:0 0 20px #5ce1b944; }
+#steps { counter-reset:phase; }
+#steps li { counter-increment:phase; padding:16px 0; align-items:flex-start; }
+#steps .dot { width:28px; height:28px; margin-top:0; display:grid; place-items:center; background:#23334a; color:var(--muted); font-size:11px; font-weight:700; }
+#steps .dot::after { content:counter(phase,decimal-leading-zero); }
+#steps .done .dot { color:#09241d; background:var(--ok); }
+#steps .run .dot { color:#071b26; background:var(--run); box-shadow:0 0 18px #65cfff33; }
+#steps .fail .dot { color:#34131a; background:var(--bad); }
+.title { font-weight:600; } .sub { margin-top:3px; }
+#memberscard { overflow-x:auto; } pre { padding:18px; max-height:460px; }
+select { padding:8px 12px; } :focus-visible { outline:3px solid var(--run); outline-offset:4px; }
+.dashboard-intro { color:var(--muted); margin:8px 0 20px; max-width:620px; }
+.dashboard-nav { display:flex; gap:20px; align-items:center; margin-bottom:28px; font-size:13px; text-transform:uppercase; letter-spacing:.1em; }
+.dashboard-nav strong { color:var(--ok); margin-right:auto; }
+.health-metrics { display:grid; grid-template-columns:1fr 1fr; gap:24px; margin-top:20px; }
+.metric label { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-bottom:8px; }
+.metric meter { width:100%; height:12px; accent-color:var(--ok); }
+.metric meter::-webkit-meter-bar { background:var(--line); border:0; }
+.metric meter::-webkit-meter-optimum-value { background:linear-gradient(90deg,var(--run),var(--ok)); }
+.console-tools { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+.console-tools input { background:var(--code); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font:inherit; max-width:100%; }
+@media(min-width:900px) { #steps { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); column-gap:28px; } }
+@media(max-width:600px) { main { padding:24px 16px; } .card { padding:18px; } .dashboard-nav { font-size:11px; gap:12px; } }
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }
 </style>
 </head>
 <body>
 <main>
+  <nav class="dashboard-nav" aria-label="Main navigation"><strong>◈ OKD / Hetzner</strong><span aria-current="page">Live status</span><a href="/manage">Cluster controls</a></nav>
   <header>
     <h1>OKD <span id="op">deploy</span> — <span id="cluster">…</span></h1>
     <select id="pick" hidden aria-label="Cluster"></select>
     <span id="state" class="badge" style="background:var(--idle)">loading</span>
   </header>
+  <p class="dashboard-intro">Follow your cluster from infrastructure to installation. Phase progress, node membership, and health updates appear here.</p>
   <p><a id="manage" href="/manage">Deploy or destroy a cluster →</a></p>
   <div class="meta" id="meta"></div>
   <div class="bar"><div id="bar" style="width:0"></div></div>
@@ -72,6 +108,10 @@ tr:first-child th { border-top: 0; }
     <h2>Cluster health <span class="sub" id="hchecked"></span></h2>
     <div class="hrow"><span id="hstate" class="badge"></span> <span id="hsummary"></span></div>
     <div class="sub" id="hcounts"></div>
+    <div class="health-metrics" id="health-metrics" hidden>
+      <div class="metric"><label for="node-meter">Ready nodes <span id="node-ratio"></span></label><meter id="node-meter" min="0" max="1" value="0"></meter></div>
+      <div class="metric"><label for="operator-meter">Available operators <span id="operator-ratio"></span></label><meter id="operator-meter" min="0" max="1" value="0"></meter></div>
+    </div>
     <ul id="hproblems"></ul>
   </section>
   <section class="card" id="memberscard" hidden>
@@ -85,6 +125,7 @@ tr:first-child th { border-top: 0; }
   </section>
   <section class="card">
     <h2>Console (last lines)</h2>
+    <div class="console-tools"><label for="console-filter">Find in output</label><input id="console-filter" type="search" placeholder="Filter visible lines…"></div>
     <pre id="tail" hidden></pre>
     <p class="hint" id="nolog">No console transcript. To see live output here, run the deploy as
       <code>./deploy-okd.sh … 2&gt;&amp;1 | tee logs/deploy-console.log</code>.
@@ -101,6 +142,13 @@ const dur = since => {
   return (h ? h + 'h ' : '') + m + 'm ' + String(sec).padStart(2, '0') + 's';
 };
 let last = null;
+$('console-filter').addEventListener('input', () => {
+  if (last && last.console) renderConsole(last.console);
+});
+function renderConsole(console) {
+  const query = $('console-filter').value.toLowerCase();
+  $('tail').textContent = console.tail.filter(line => line.toLowerCase().includes(query)).join('\n');
+}
 // ?cluster=NAME pins one cluster; otherwise the server follows the active run
 let pinned = new URLSearchParams(location.search).get('cluster') || '';
 $('pick').addEventListener('change', e => {
@@ -187,7 +235,7 @@ function render(s) {
   if (con) {
     const pre = $('tail');
     const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
-    pre.textContent = con.tail.join('\n');
+    renderConsole(con);
     if (atBottom) pre.scrollTop = pre.scrollHeight;
   }
   clock();
@@ -215,6 +263,12 @@ function renderHealth(s) {
     ? `nodes Ready ${h.nodes_ready}/${h.nodes} · operators available ${h.operators_ok}/${h.operators}`
       + (h.progressing && h.progressing.length ? ` · progressing: ${h.progressing.join(', ')}` : '')
     : '';
+  $('health-metrics').hidden = h.nodes === undefined;
+  for (const [id, value, total] of [['node', h.nodes_ready, h.nodes], ['operator', h.operators_ok, h.operators]]) {
+    const known = Number.isFinite(value) && Number.isFinite(total) && total > 0;
+    $(id + '-meter').value = known ? value / total : 0;
+    $(id + '-ratio').textContent = known ? `${value} / ${total}` : 'Not reported';
+  }
   $('hproblems').replaceChildren(...(h.problems || []).map(p => {
     const li = document.createElement('li'); li.textContent = p; return li;
   }));

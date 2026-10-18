@@ -8,6 +8,7 @@ AUTODESTROY_NOTE="automatic teardown disabled"
 local -a destroy_command=(env -u HCLOUD_OKD4_CONTEXT_DIR -u CLUSTER_ID HCLOUD_OKD4_SCHEDULED=1 bash "$REPO_ROOT/destroy-okd.sh")
 [ -z "${CLUSTER_ID:-}" ] || destroy_command+=(--cluster "$CLUSTER_ID")
 destroy_command+=(--yes)
+[ ! -f .snapshot-before-destroy ] || destroy_command+=(--snapshot-before-destroy)
 local scheduled_command log_path
 printf -v scheduled_command '%q ' "${destroy_command[@]}"
 printf -v log_path '%q' "$PWD/logs/autodestroy.log"

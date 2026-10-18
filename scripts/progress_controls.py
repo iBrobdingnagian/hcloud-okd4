@@ -7,6 +7,12 @@ import secrets
 import subprocess
 import threading
 
+DEVOPS_COMPONENTS = frozenset('''cert-manager argocd odf jenkins gitlab harbor
+artifactory awx sonarqube jaeger opensearch istio kiali kafka kafka-kraft
+strimzi-kafka appsim loki loki-operator tempo tempo-operator otel otel-operator
+observability observability-operator appsim-gitops appsim-boutique appsim-events
+appsim-awx appsim-cicd appsim-mesh appsim-bookinfo appsim-emojivoto appsim-all'''.split())
+
 
 class Controls:
     def __init__(self, repo):
@@ -59,13 +65,24 @@ class Controls:
             'master-type': r'[a-z0-9-]+', 'worker-type': r'[a-z0-9-]+',
             'release': r'[0-9]+\.[0-9]+[a-zA-Z0-9_.-]*',
             'duration': r'[1-9][0-9]*m?',
+            'autodestroy-at': r'[1-9][0-9]*m?',
+            'storage-backend': r'(?:local|smb)',
+            'version-policy': r'(?:n-2|latest)',
+            'le-email': r'[^\s@]+@[^\s@]+\.[^\s@]+',
         }
+        booleans = {'no-autodestroy', 'monitoring', 'rebuild-image',
+                    'letsencrypt', 'letsencrypt-prod'}
         for key, value in options.items():
-            if key == 'no-autodestroy':
+            if key in booleans:
                 if type(value) is not bool:
-                    raise ValueError('Invalid automatic teardown option.')
+                    raise ValueError(f'Invalid boolean option: {key}')
                 if value:
-                    args.append('--no-autodestroy')
+                    args.append('--' + key)
+            elif key == 'devops-components':
+                if (not isinstance(value, str) or len(value) > 1024
+                        or not value or any(part not in DEVOPS_COMPONENTS for part in value.split(','))):
+                    raise ValueError('Choose supported DevOps components.')
+                args += ['--devops-components', value]
             elif key in patterns and isinstance(value, str) and len(value) <= 100 and re.fullmatch(patterns[key], value):
                 args += ['--' + key, value]
             else:
@@ -75,6 +92,10 @@ class Controls:
             raise ValueError('Lab options require the Lab profile.')
         if any(k in options for k in ('masters', 'workers', 'master-type', 'worker-type')) and profile != '4':
             raise ValueError('Custom node options require the Manual profile.')
+        if options.get('no-autodestroy') and 'autodestroy-at' in options:
+            raise ValueError('Enable automatic teardown before setting its time.')
+        if (options.get('letsencrypt-prod') or 'le-email' in options) and not options.get('letsencrypt'):
+            raise ValueError('Enable certificates before setting certificate options.')
         return args
 
     def launch(self, data):

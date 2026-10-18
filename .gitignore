@@ -28,6 +28,10 @@ pull-secret.json
 # Cluster-specific generated state and credentials
 .work/
 .secrets/
+.cluster-snapshots/
+.snapshot-before-destroy
+snapshot-import*.json
+terraform/cluster-restore.auto.tfvars.json
 .phases/
 .cluster-autoscaler-installed
 !terraform/.terraform.lock.hcl
@@ -43,3 +47,6 @@ letsencrypt-backup/
 # local deploy run logs
 deploy-run.log
 deploy-start.txt
+
+# Generated private billing report
+/report/

@@ -134,11 +134,13 @@ class ClusterTests(unittest.TestCase):
         result = self.bash('''
 . "$REPO_ROOT/functions/autodestroy.sh"
 uname() { echo Linux; }
+date() { if [ "$1" = -d ]; then echo test-deadline; else command date "$@"; fi; }
 systemctl() { return 0; }
 systemd-run() { printf '%s\\n' "$@" > scheduled-args; }
 NO_AUTODESTROY=0 ASSUME_YES=1 DUR=8 FLAG_AUTODESTROY_AT=""
 CLUSTER_ID=dev AUTODESTROY_ID=dev-checkout
 HCLOUD_OKD4_CONTEXT_DIR="$PWD/.work/dev"
+touch .snapshot-before-destroy
 schedule_autodestroy
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -146,6 +148,20 @@ schedule_autodestroy
         self.assertIn('--unit=hcloud-okd4-autodestroy-dev-checkout', args)
         self.assertIn('--cluster dev', args)
         self.assertIn('-u HCLOUD_OKD4_CONTEXT_DIR', args)
+        self.assertIn('--snapshot-before-destroy', args)
+
+    def test_snapshot_commands_do_not_receive_fresh_deployment_defaults(self):
+        child = self.repo / 'deploy-okd.sh'
+        child.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$HCLOUD_OKD4_CONTEXT_DIR/received-args"\n')
+        for request in (['--snapshot-list'], ['--restore-snapshot', 'saved-set', '--yes'],
+                        ['--snapshot-cloud-list'], ['--snapshot-import-template', 'snapshot-import.json'],
+                        ['--snapshot-import-plan', 'snapshot-import.json'], ['--snapshot-import', 'snapshot-import.json']):
+            with self.subTest(request=request):
+                self.assertEqual(context.run(self.repo, 'deploy', ['--cluster', 'dev', *request]), 0)
+                args = (self.repo / '.work/dev/received-args').read_text().splitlines()
+                self.assertNotIn('--profile', args)
+                self.assertNotIn('--masters', args)
+                self.assertNotIn('--release', args)
 
     def test_domain_and_cidr_validation(self):
         for field, value in (('domain', 'staging.example.com'), ('masters', 2)):

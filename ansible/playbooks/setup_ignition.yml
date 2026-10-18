@@ -4,6 +4,10 @@
     - ignition
   gather_facts: no
   tasks:
+    - name: wait for cloud-init package setup to finish
+      ansible.builtin.wait_for:
+        path: /etc/cloud-init.done
+        timeout: 300
     - name: ensure that directories are present
       file:
         state: directory
@@ -22,5 +26,21 @@
         group: root
         mode: 0644
     - name: install apache webserver
-      package:
+      ansible.builtin.apt:
         name: apache2
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: 180
+        update_cache_retries: 5
+    - name: ensure ignition webserver is enabled and running
+      ansible.builtin.service:
+        name: apache2
+        state: started
+        enabled: true
+    - name: verify bootstrap ignition is served
+      ansible.builtin.uri:
+        url: http://127.0.0.1/bootstrap.ign
+        status_code: 200
+        return_content: false
+        use_proxy: false

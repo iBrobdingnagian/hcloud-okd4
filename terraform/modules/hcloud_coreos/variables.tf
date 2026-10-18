@@ -42,6 +42,15 @@ variable "image" {
   default     = "ubuntu-22.04"
 }
 
+variable "restore_nodes" {
+  type = map(object({
+    image = number
+    ipv4  = number
+    ipv6  = number
+  }))
+  default = {}
+}
+
 variable "user_data" {
   description = "Cloud-Init user data to use during server creation"
   default     = null

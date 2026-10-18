@@ -89,6 +89,16 @@ variable "image" {
   default     = "fcos"
 }
 
+variable "restore_nodes" {
+  type = map(object({
+    image = number
+    ipv4  = number
+    ipv6  = number
+  }))
+  default     = {}
+  description = "Per-node cold snapshots and retained Primary IPs; written only by --restore-snapshot."
+}
+
 variable "server_type_master" {
   type        = string
   description = "Server type for master nodes"

@@ -11,15 +11,20 @@ REPO_ROOT=$(cd "$(dirname "$0")" && pwd)
 cluster_dispatch destroy "$@"
 . "$REPO_ROOT/functions/lifecycle.sh"
 . "$REPO_ROOT/functions/progress.sh"
+. "$REPO_ROOT/functions/snapshots.sh"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 err() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 ASSUME_YES=0
+SNAPSHOT_BEFORE_DESTROY=0
+[ ! -f .snapshot-before-destroy ] || SNAPSHOT_BEFORE_DESTROY=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes) ASSUME_YES=1; shift ;;
-    -h|--help) echo 'Usage: ./destroy-okd.sh [--cluster NAME] [--yes]'; exit 0 ;;
+    --snapshot-before-destroy) SNAPSHOT_BEFORE_DESTROY=1; shift ;;
+    --no-snapshot-before-destroy) SNAPSHOT_BEFORE_DESTROY=0; shift ;;
+    -h|--help) echo 'Usage: ./destroy-okd.sh [--cluster NAME] [--yes] [--snapshot-before-destroy | --no-snapshot-before-destroy]'; exit 0 ;;
     *) err "unknown option: $1" ;;
   esac
 done
@@ -96,6 +101,12 @@ else
   [ "$CONFIRM" = "yes" ] || { echo "Aborted."; exit 0; }
 fi
 
+# Snapshot must complete before ANY server or autoscaler-node deletion.
+if [ "$SNAPSHOT_BEFORE_DESTROY" = 1 ]; then
+  log "Taking cold cluster snapshots before teardown (nodes will be stopped)"
+  snapshot_before_destroy
+fi
+
 # ── cluster-autoscaler nodes (created via the Hetzner API, NOT terraform) ──
 # The upstream cluster-autoscaler provisions servers directly through the
 # Hetzner API, so `terraform destroy` neither knows nor removes them — and
@@ -165,6 +176,7 @@ docker run --rm --platform=linux/amd64 --dns 1.1.1.1 --env-file .env \
 # anything real. Left in place, the next deploy skips ignition generation and
 # fails on the missing ignition/auth/kubeconfig.
 rm -rf .phases
+rm -f terraform/cluster-restore.auto.tfvars.json
 echo "  cleared deploy checkpoints (.phases/)"
 
 # CoreOS images may be shared by multiple clusters. Retain them on teardown.

@@ -318,7 +318,9 @@ def run(repo, operation, args):
                 day_two = any(flag in args for flag in (
                     '--scale', '--rescale', '--rescale-role', '--rescale-type', '--admin', '--monitoring',
                     '--devops', '--devops-components', '--autoscale', '--cluster-autoscaler', '--ca-smoke-test',
-                    '--ca-type', '--ca-min', '--ca-max', '--terraform-plan', '--resume'))
+                    '--ca-type', '--ca-min', '--ca-max', '--terraform-plan', '--resume',
+                    '--restore-snapshot', '--snapshot-list', '--snapshot-cloud-list',
+                    '--snapshot-import-template', '--snapshot-import-plan', '--snapshot-import'))
                 if '--scale' in args and '--masters' not in args and '--workers' not in args:
                     args += ['--masters', str(data['masters']), '--workers', str(data['workers'])]
                 if not day_two and not (work / '.phases/configured').exists():
@@ -327,7 +329,10 @@ def run(repo, operation, args):
                             args += [flag, str(value)]
                     if '--profile' not in args:
                         args += ['--profile', '4']
-                if not data['autodestroy'] and '--no-autodestroy' not in args:
+                snapshot_management = any(flag in args for flag in (
+                    '--snapshot-list', '--snapshot-cloud-list', '--snapshot-import-template',
+                    '--snapshot-import-plan', '--snapshot-import'))
+                if not data['autodestroy'] and '--no-autodestroy' not in args and not snapshot_management:
                     args.append('--no-autodestroy')
         else:
             work = repo

@@ -5,27 +5,662 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OKD cluster controls</title>
 <style>
-:root { color-scheme: light dark; --bg:#f4f6fa; --card:#fff; --ink:#172337; --muted:#59677b; --line:#d6deea; --blue:#2159c5; --red:#b32331; }
-@media(prefers-color-scheme:dark) { :root { --bg:#101720; --card:#182231; --ink:#edf2fa; --muted:#abb9ce; --line:#334259; --blue:#94b8ff; --red:#ff9aa4; } }
-* { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui,sans-serif; }
-main { max-width:980px; margin:auto; padding:32px 20px 64px; } header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-bottom:24px; }
-h1 { font-size:30px; margin:0; letter-spacing:-.03em; } h2,legend { font-size:18px; font-weight:650; } h2 { margin:0 0 12px; }
-p { margin:8px 0 16px; } a { color:var(--blue); } .eyebrow { color:var(--muted); font-size:12px; letter-spacing:.12em; text-transform:uppercase; margin:0 0 4px; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:22px; margin:18px 0; }
-.muted,small { color:var(--muted); } small { display:block; margin-top:6px; } .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
-label { display:block; } input,select,button { font:inherit; } input:not([type=radio]):not([type=checkbox]),select { display:block; width:100%; padding:10px 12px; margin-top:6px; border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--ink); }
-input[type=radio],input[type=checkbox] { accent-color:var(--blue); margin-right:8px; } button { border:0; border-radius:7px; padding:11px 18px; background:var(--blue); color:var(--card); cursor:pointer; font-weight:650; }
-button:disabled { opacity:.5; cursor:not-allowed; } :focus-visible { outline:3px solid var(--blue); outline-offset:3px; }
-fieldset { border:0; padding:0; margin:0; min-width:0; } legend { margin-bottom:12px; } .choices { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
-.choice { border:1px solid var(--line); border-radius:8px; padding:14px; cursor:pointer; } .choice:has(input:checked) { border-color:var(--blue); outline:1px solid var(--blue); }
-.danger { color:var(--red); } #message { white-space:pre-wrap; } pre { background:var(--bg); padding:16px; border-radius:8px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:380px; overflow:auto; font-size:12px; }
-code { overflow-wrap:anywhere; } .row { display:flex; flex-wrap:wrap; align-items:center; gap:16px; margin-top:16px; } [hidden] { display:none !important; }
-@media(max-width:640px) { .grid,.choices { grid-template-columns:1fr; } .card { padding:16px; } }
+:root {
+  color-scheme: dark;
+  --bg: #0a121e;
+  --card: #111a2a;
+  --ink: #e0e8f0;
+  --muted: #8899a6;
+  --line: #2a3a4a;
+  --blue: #4fc3f7;
+  --cyan: #80deea;
+  --mint: #a5d6a7;
+  --red: #ef9a9a;
+  --accent: #80deea;
+  --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --motion-safe: prefers-reduced-motion: no-preference;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a121e;
+    --card: #111a2a;
+    --ink: #e0e8f0;
+    --muted: #8899a6;
+    --line: #2a3a4a;
+    --blue: #4fc3f7;
+    --cyan: #80deea;
+    --mint: #a5d6a7;
+    --red: #ef9a9a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+  width: 100%;
+  overflow-x: hidden;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+h1 {
+  font-size: 24px;
+  margin: 0;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+}
+
+h2, legend {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 12px;
+  color: var(--ink);
+}
+
+h3 {
+  font-size: 16px;
+  font-weight: 500;
+  margin: 0 0 8px;
+  color: var(--ink);
+}
+
+p {
+  margin: 8px 0 16px;
+  color: var(--ink);
+}
+
+a {
+  color: var(--blue);
+  text-decoration: none;
+  transition: var(--transition);
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.eyebrow {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 0 0 4px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 22px;
+  margin: 18px 0;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: var(--transition);
+}
+
+.card:hover {
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.muted, small {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+small {
+  display: block;
+  margin-top: 6px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 768px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--ink);
+}
+
+input, select, button {
+  font: inherit;
+  border-radius: 7px;
+}
+
+input:not([type=radio]):not([type=checkbox]), select {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  margin-top: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  transition: var(--transition);
+}
+
+input:not([type=radio]):not([type=checkbox]):focus, select:focus {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+input[type=radio], input[type=checkbox] {
+  accent-color: var(--blue);
+  margin-right: 8px;
+}
+
+button {
+  border: 0;
+  border-radius: 7px;
+  padding: 11px 18px;
+  background: var(--blue);
+  color: var(--card);
+  cursor: pointer;
+  font-weight: 600;
+  transition: var(--transition);
+}
+
+button:hover:not(:disabled) {
+  background: var(--cyan);
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
+}
+
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+
+legend {
+  margin-bottom: 12px;
+  padding: 0 8px;
+  color: var(--ink);
+}
+
+.choices {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.choice {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  cursor: pointer;
+  transition: var(--transition);
+  background: var(--card);
+}
+
+.choice:hover {
+  border-color: var(--blue);
+}
+
+.choice:has(input:checked) {
+  border-color: var(--blue);
+  background: rgba(79, 195, 247, 0.1);
+}
+
+.danger {
+  color: var(--red);
+}
+
+#message {
+  white-space: pre-wrap;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--card);
+  margin: 16px 0;
+}
+
+pre {
+  background: var(--bg);
+  padding: 16px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 380px;
+  overflow: auto;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+code {
+  overflow-wrap: anywhere;
+  background: var(--card);
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: monospace;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.dashboard {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 24px;
+  margin-top: 24px;
+}
+
+@media (max-width: 1024px) {
+  .dashboard {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sidebar {
+  grid-column: 2;
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  height: fit-content;
+}
+
+.topology-container {
+  margin: 24px 0;
+  padding: 16px;
+  background: var(--card);
+  border-radius: 12px;
+  border: 1px solid var(--line);
+}
+
+.topology {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  transition: var(--transition);
+  position: relative;
+  min-width: 120px;
+  text-align: center;
+}
+
+.node:hover {
+  background: var(--card);
+  border-color: var(--blue);
+}
+
+.node.master {
+  border-color: var(--blue);
+}
+
+.node.worker {
+  border-color: var(--mint);
+}
+
+.node-count {
+  font-size: 14px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.connection {
+  position: absolute;
+  height: 2px;
+  background: var(--line);
+  z-index: -1;
+  width: 100%;
+  top: 50%;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.connection-master {
+  background: rgba(79, 195, 247, 0.3);
+}
+
+.connection-worker {
+  background: rgba(128, 222, 234, 0.3);
+}
+
+.advanced-options {
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 24px;
+}
+
+.advanced-toggle {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  margin-bottom: 16px;
+  color: var(--muted);
+  transition: var(--transition);
+}
+
+.advanced-toggle:hover {
+  color: var(--ink);
+}
+
+.advanced-toggle input {
+  margin-right: 8px;
+}
+
+.advanced-content {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease-out;
+}
+
+.advanced-content.show {
+  max-height: 1000px;
+  transition: max-height 0.5s ease-in;
+}
+
+.tooltip {
+  position: relative;
+  display: inline-block;
+}
+
+.tooltip:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--card);
+  color: var(--ink);
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-size: 14px;
+  white-space: nowrap;
+  z-index: 10;
+  margin-bottom: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.tooltip::after {
+  opacity: 0;
+  transition: opacity 0.2s;
+  visibility: hidden;
+}
+
+.tooltip:hover::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+.chip {
+  display: inline-block;
+  background: rgba(128, 222, 234, 0.2);
+  color: var(--cyan);
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  margin-right: 4px;
+  margin-bottom: 4px;
+}
+
+.warning {
+  background: rgba(239, 154, 154, 0.2);
+  color: var(--red);
+}
+
+.info {
+  background: rgba(128, 222, 234, 0.2);
+  color: var(--cyan);
+}
+
+.devops-components {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.devops-component {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg);
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  transition: var(--transition);
+}
+
+.devops-component:hover {
+  border-color: var(--blue);
+  background: var(--card);
+}
+
+@media (max-width: 600px) {
+  .devops-components {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .card {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .choices {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .node {
+    animation: float 3s ease-in-out infinite;
+  }
+
+  @keyframes float {
+    0%, 100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-5px);
+    }
+  }
+}
+
+.lifecycle-illustration {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 24px 0;
+}
+
+.lifecycle-step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.lifecycle-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--blue);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--card);
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.lifecycle-line {
+  flex-grow: 1;
+  height: 2px;
+  background: var(--line);
+  position: relative;
+}
+
+.lifecycle-line::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  background: var(--line);
+  border-radius: 50%;
+}
+
+.lifecycle-line:last-child::after {
+  display: none;
+}
+
+.lifecycle-description {
+  flex-grow: 1;
+}
+
+@media (max-width: 600px) {
+  .lifecycle-illustration {
+    display: none;
+  }
+}
+/* Responsive workbench and live topology refinements. */
+:root { --bg:#0b1220; --card:#131f32; --ink:#e8f0fb; --muted:#a3b4cb; --line:#293a52; --blue:#65cfff; --mint:#5ce1b9; }
+body { background:radial-gradient(ellipse at 85% 0%,#173346 0%,transparent 45%),var(--bg); }
+main { max-width:1280px; padding:32px 24px 64px; overflow:visible; }
+h1 { font-size:clamp(28px,4vw,38px); letter-spacing:-.04em; }
+.card { border-radius:18px; box-shadow:0 14px 40px #0002; }
+#controls { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:20px; align-items:start; }
+#controls>section,.dashboard>section { grid-column:1; margin:0; }
+.dashboard { display:contents; }
+.sidebar { grid-column:2; grid-row:1 / span 4; top:20px; min-width:0; }
+.sidebar .card,.topology-container { margin:0 0 20px; padding:22px; }
+.sidebar h3 { margin-bottom:14px; }
+.topology-container { background:linear-gradient(145deg,#173346,#131f32); border-color:#3c6076; }
+.topology { gap:8px; min-height:180px; }
+.topology svg { width:100%; max-width:320px; overflow:visible; }
+.network-line { fill:none; stroke:#37536b; stroke-width:1.5; stroke-dasharray:5 4; }
+.server { fill:#163244; stroke:var(--blue); stroke-width:1.5; }
+.server.worker { fill:#163b36; stroke:var(--mint); }
+.server-detail { fill:none; stroke:var(--ink); stroke-width:1.5; }
+.network-label { fill:var(--muted); font:11px system-ui,sans-serif; }
+.summary-row { display:flex; justify-content:space-between; gap:16px; padding:10px 0; border-bottom:1px solid var(--line); font-size:13px; }
+.summary-row>span { color:var(--muted); flex-shrink:0; }
+.summary-row strong { text-align:right; font-weight:550; overflow-wrap:anywhere; min-width:0; }
+.advanced-content.show { max-height:none; overflow:visible; }
+.advanced-content .grid { margin-top:18px; }
+.advanced-toggle { color:var(--ink); font-weight:600; }
+.profile-cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:20px; }
+.profile-cards button { text-align:left; padding:14px 10px; border:1px solid var(--line); background:var(--bg); color:var(--ink); font-size:13px; }
+.profile-cards button small { font-size:11px; font-weight:400; }
+.profile-cards button[aria-pressed=true] { border-color:var(--blue); background:#18344a; box-shadow:inset 0 0 0 1px var(--blue); }
+.profile-cards button:hover:not(:disabled) { background:#18344a; transform:translateY(-2px); }
+button.destructive { background:var(--red); color:#30131b; }
+.grid>label { min-width:0; } code { word-break:break-word; }
+input,select { min-width:0; } select[multiple] { min-height:160px; }
+.lifecycle-illustration { padding:16px; background:var(--bg); border-radius:12px; }
+.lifecycle-icon { background:#203b50; color:var(--blue); }
+.warning { padding:12px; border-radius:8px; font-size:13px; }
+.workbench-nav { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:28px; font-size:12px; text-transform:uppercase; letter-spacing:.1em; }
+.workbench-nav strong { color:var(--mint); }
+.hero-description { color:var(--muted); max-width:620px; margin-top:8px; }
+@media(max-width:1024px) { #controls { grid-template-columns:1fr; } .sidebar { grid-column:1; grid-row:auto; position:static; display:grid; grid-template-columns:1fr 1fr; gap:16px; } .sidebar .card:last-child { grid-column:1 / -1; } .sidebar .card,.topology-container { margin:0; } }
+@media(max-width:640px) { main { padding:20px 16px 40px; } .grid,.choices { grid-template-columns:1fr; } .sidebar { grid-template-columns:1fr; } .profile-cards { grid-template-columns:repeat(2,minmax(0,1fr)); } .workbench-nav { font-size:10px; } }
+@media(prefers-reduced-motion:no-preference) { .network-line { animation:network-flow 10s linear infinite; } @keyframes network-flow { to { stroke-dashoffset:-90; } } .card { animation:reveal .4s ease-out both; } @keyframes reveal { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } } }
+@media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }
+.snapshot-guide { margin:24px 0; border-color:#3c6076; }
+.snapshot-guide summary { cursor:pointer; font-size:20px; font-weight:650; }
+.snapshot-flow { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:18px 0; color:var(--muted); }
+.snapshot-flow strong { padding:7px 12px; border:1px solid var(--line); border-radius:30px; color:var(--mint); font-size:13px; }
+.snapshot-steps { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; list-style:none; counter-reset:cycle; }
+.snapshot-steps>li { counter-increment:cycle; padding:18px; border:1px solid var(--line); border-radius:12px; background:var(--bg); min-width:0; }
+.snapshot-steps h3::before { content:counter(cycle) ' · '; color:var(--blue); }
+.snapshot-steps p { font-size:14px; color:var(--muted); }
+.snapshot-steps pre { max-height:none; margin:12px 0; font-size:12px; background:var(--card); }
+.snapshot-steps button { padding:7px 12px; font-size:12px; }
+.snapshot-steps li:last-child { border-color:#426a60; }
+.snapshot-guide input { max-width:440px; }
+.snapshot-import { border-top:1px solid var(--line); margin-top:22px; padding-top:18px; }
+.snapshot-import summary { font-size:17px; }
+.snapshot-import ol { padding-left:24px; }
+.snapshot-import li { margin:16px 0; }
+.snapshot-import pre { margin:10px 0; }
+.snapshot-import button { padding:7px 12px; font-size:12px; }
+@media(max-width:640px) { .snapshot-steps { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
 <main>
-  <header><div><p class="eyebrow">OKD on Hetzner</p><h1>Cluster controls</h1></div><a id="status-link" href="/">View cluster status →</a></header>
+  <nav class="workbench-nav" aria-label="Main navigation"><strong>◈ OKD / Hetzner</strong><span aria-current="page">Deployment workbench</span></nav>
+  <header>
+    <div>
+      <p class="eyebrow">Configure · review · launch</p>
+      <h1>Your next cluster starts here.</h1>
+      <p class="hero-description">Choose the right footprint, add your tools, and follow every step of your OKD deployment.</p>
+    </div>
+    <a id="status-link" href="/">View cluster status →</a>
+  </header>
+
   <section class="card" aria-labelledby="access-title">
     <h2 id="access-title">Operator access</h2>
     <p class="muted">Use the control token from <code>logs/progress-control-token</code> on the server. It changes when the Python server restarts.</p>
@@ -34,6 +669,65 @@ code { overflow-wrap:anywhere; } .row { display:flex; flex-wrap:wrap; align-item
       <div class="row"><button type="submit">Unlock controls</button><span id="access-state" role="status">Locked</span></div>
     </form>
   </section>
+
+  <details class="card snapshot-guide" id="snapshot-guide" open>
+    <summary>Save, destroy & restore — repeat the cycle</summary>
+    <p class="muted">Use these commands in a terminal on the deployment host, from this repository. They follow the cluster selected below. Copying a command does not run it.</p>
+    <div class="snapshot-flow" aria-label="Repeatable snapshot lifecycle"><strong>Running cluster</strong><span aria-hidden="true">→</span><strong>New snapshot + destroy</strong><span aria-hidden="true">→</span><strong>Restore + use</strong><span aria-hidden="true">↻</span><strong>Repeat</strong></div>
+    <p id="snapshot-guide-cluster" class="muted"></p>
+    <ol class="snapshot-steps">
+      <li><h3>Save the cluster, then destroy it</h3>
+        <p>The script gracefully stops the nodes and snapshots every disk. Teardown proceeds only if the snapshot set completes. Type <code>yes</code> when asked to confirm deletion.</p>
+        <pre><code id="snapshot-destroy-command"></code></pre>
+        <button type="button" data-copy-command="snapshot-destroy-command" aria-label="Copy snapshot and destroy command">Copy command</button>
+      </li>
+      <li><h3>Choose a completed snapshot set</h3>
+        <p>List saved sets and choose the new set marked <code>ready</code> to restore your latest changes. Older sets remain available too.</p>
+        <pre><code id="snapshot-list-command"></code></pre>
+        <button type="button" data-copy-command="snapshot-list-command" aria-label="Copy snapshot list command">Copy command</button>
+        <label style="margin-top:14px">Snapshot ID to restore<input id="snapshot-restore-id" placeholder="Paste the ready snapshot set ID" pattern="[a-zA-Z0-9_\-]{1,80}" maxlength="80" autocomplete="off" spellcheck="false"><small>Use the set ID from the list, not a single Hetzner image ID.</small></label>
+      </li>
+      <li><h3>Restore and keep the cluster running</h3>
+        <p>Restore the saved node disks, settings and credentials. Terraform recreates the load balancer, network, firewalls and Cloudflare records. Type <code>restore</code> when prompted; wait for health checks to pass.</p>
+        <pre><code id="snapshot-restore-command"></code></pre>
+        <button type="button" data-copy-command="snapshot-restore-command" aria-label="Copy snapshot restore command">Copy command</button>
+        <small><code>--no-autodestroy</code> keeps the restored cluster running. Its load balancer may receive a new IP; DNS is updated.</small>
+      </li>
+      <li><h3>Make changes, then repeat step 1</h3>
+        <p>Restoring keeps the source snapshots. The next snapshot-enabled teardown creates a <strong>new</strong> set containing your latest changes: snapshot A → restore A → change → snapshot B → restore B.</p>
+        <p>Keep <code>.cluster-snapshots/</code>, your configuration, credentials and original SSH key. Named-cluster bundles live under <code>.work/NAME/.cluster-snapshots/</code>.</p>
+        <p><strong>Snapshots and retained IPv4 addresses remain billable.</strong> Old protected snapshots are not cleaned up automatically.</p>
+      </li>
+    </ol>
+    <details class="snapshot-import" id="snapshot-import-guide">
+      <summary>Already have snapshots in Hetzner? Discover or import them</summary>
+      <p><strong>Recorded set:</strong> use step 2 above, then restore its set ID. There is no need to import it again.</p>
+      <p><strong>Unrecorded image:</strong> use this review workflow. A disk image alone cannot supply the original load balancer, DNS settings, IPs or installation identity.</p>
+      <ol>
+        <li><strong>Discover available Hetzner snapshots.</strong> Check each image's original source server and whether it already belongs to a local recorded set.
+          <pre><code id="snapshot-discover-command"></code></pre>
+          <button type="button" data-copy-command="snapshot-discover-command" aria-label="Copy cloud snapshot discovery command">Copy command</button>
+        </li>
+        <li><strong>Create and edit the review file.</strong> Set one image and both original Primary IP IDs for every node. Point it at the original Terraform state, configuration file and matching installation artifacts. For a named cluster, the file is created in its isolated workspace.
+          <pre><code id="snapshot-template-command"></code></pre>
+          <button type="button" data-copy-command="snapshot-template-command" aria-label="Copy import template command">Copy command</button>
+          <p class="muted">The file starts with zero IDs and confirmations set to false. Only confirm if all nodes were snapshotted while stopped at the same recovery point and the artifacts belong to that exact cluster incarnation. The image metadata cannot prove this for you. If original IPs or matching files are lost, stop and use a separate recovery procedure.</p>
+        </li>
+        <li><strong>Validate before recording anything.</strong> This checks the complete node mapping, image provenance, original IPs and cluster files. It performs no cloud changes or restore.
+          <pre><code id="snapshot-import-plan-command"></code></pre>
+          <button type="button" data-copy-command="snapshot-import-plan-command" aria-label="Copy import validation command">Copy command</button>
+        </li>
+        <li><strong>Record the reviewed set.</strong> Type <code>import</code> when prompted. This copies matching artifacts into a new local set; it does not boot, stop, delete or relabel anything in Hetzner. Existing sets are never overwritten.
+          <pre><code id="snapshot-import-command"></code></pre>
+          <button type="button" data-copy-command="snapshot-import-command" aria-label="Copy snapshot import command">Copy command</button>
+          <p>Then use the new <code>import-…</code> set ID in step 3. Restore still refuses to replace a running cluster. Images stay in Hetzner and continue to incur charges; importing does not change their deletion protection.</p>
+        </li>
+      </ol>
+    </details>
+    <p class="muted" style="margin-top:16px">This procedure requires an installed, healthy cluster and its original workspace. Attached volumes, private node networks and unmanaged/autoscaled nodes are unsupported; external storage needs a separate backup. Stop the resident autoscaler before snapshotting. Use snapshot-enabled teardown each time; ordinary Destroy does not create a new snapshot unless the saved snapshot preference is enabled.</p>
+    <p id="snapshot-copy-status" role="status" aria-live="polite"></p>
+  </details>
+
   <form id="operation-form">
     <fieldset id="controls" disabled>
       <section class="card">
@@ -42,6 +736,7 @@ code { overflow-wrap:anywhere; } .row { display:flex; flex-wrap:wrap; align-item
         <p id="config-note" class="muted"></p>
         <p id="cluster-state" role="status" class="muted">Unlock to load cluster activity.</p>
       </section>
+
       <section class="card">
         <fieldset><legend>2. Choose an operation</legend>
           <div class="choices">
@@ -51,46 +746,262 @@ code { overflow-wrap:anywhere; } .row { display:flex; flex-wrap:wrap; align-item
           </div>
         </fieldset>
       </section>
+
       <section class="card" id="settings">
-        <h2>Deployment options</h2>
+        <h2>3. Configure deployment</h2>
+        <div class="profile-cards" role="group" aria-label="Deployment profile presets">
+          <button type="button" data-profile="2" aria-pressed="true">◈ Cost optimized<small>Production · 3 + 3 nodes</small></button>
+          <button type="button" data-profile="1" aria-pressed="false">▣ Dedicated<small>Production · CCX servers</small></button>
+          <button type="button" data-profile="3" aria-pressed="false">◇ Lab<small>Flexible topology and tier</small></button>
+          <button type="button" data-profile="4" aria-pressed="false">⊞ Custom<small>Choose counts and types</small></button>
+        </div>
         <div class="grid">
           <label>Profile<select id="profile"><option value="2">Production — cost optimized (3 masters / 3 workers)</option><option value="1">Production — dedicated servers (3 masters / 3 workers)</option><option value="3">Lab</option><option value="4">Manual topology and server types</option></select></label>
           <label>Region<input id="region" placeholder="Current configured region" pattern="[a-z0-9\-]+"></label>
           <label>OKD release<input id="release" placeholder="Current configured release" pattern="[0-9]+\.[0-9]+[a-zA-Z0-9_.\-]*"></label>
           <label>Duration<input id="duration" value="8" required pattern="[1-9][0-9]*m?"><small>Hours (8) or minutes (90m).</small></label>
         </div>
+
         <fieldset id="lab" hidden class="grid" style="margin-top:16px">
           <label>Lab topology<select id="lab-topology"><option>1x0</option><option selected>1x1</option><option>1x2</option><option>1x3</option><option>3x3</option></select></label>
           <label>Lab tier<select id="lab-tier"><option value="low">Low — cheapest qualifying</option><option value="mid">Mid — more headroom</option><option value="high">High — dedicated servers</option></select></label>
         </fieldset>
+
         <fieldset id="manual" hidden class="grid" style="margin-top:16px">
           <label>Masters<select id="masters"><option>1</option><option selected>3</option><option>5</option></select></label>
           <label>Workers<input id="workers" type="number" min="0" max="999" value="3" required></label>
           <label>Master server type<input id="master-type" placeholder="Cheapest qualifying type" pattern="[a-z0-9\-]+"></label>
           <label>Worker server type<input id="worker-type" placeholder="Cheapest qualifying type" pattern="[a-z0-9\-]+"></label>
         </fieldset>
+
         <label class="row"><span><input id="autodestroy" type="checkbox" checked>Schedule automatic teardown after the duration</span></label>
         <small>The script reports whether the host successfully scheduled teardown.</small>
+
+        <div class="advanced-options">
+          <label class="advanced-toggle"><input type="checkbox" id="advanced-toggle" aria-controls="advanced-content" aria-expanded="false">Advanced options · tools, storage & certificates</label>
+          <div id="advanced-content" class="advanced-content" hidden>
+            <div class="grid">
+              <label>Storage backend<select id="storage-backend"><option value="local">local (node volumes, default)</option><option value="smb">smb (Hetzner Storage Box)</option></select></label>
+              <label>Version policy<select id="version-policy"><option value="n-2">n-2 (default; install two releases behind the channel head for stability)</option><option value="latest">latest (track the channel head)</option></select></label>
+            </div>
+
+            <div class="grid">
+              <label>Let's Encrypt<select id="letsencrypt"><option value="">Disabled</option><option value="staging">Staging (test certificates)</option></select></label>
+              <label>Let's Encrypt email<input type="email" id="le-email" placeholder="ACME account email (default: CLOUDFLARE_EMAIL from .env)"></label>
+            </div>
+
+            <div class="grid">
+              <label>DevOps components<select id="devops-components" multiple size="6" aria-describedby="devops-help">
+                <option value="cert-manager">cert-manager</option>
+                <option value="argocd">argocd</option>
+                <option value="odf">odf</option>
+                <option value="jenkins">jenkins</option>
+                <option value="gitlab">gitlab</option>
+                <option value="harbor">harbor</option>
+                <option value="artifactory">artifactory</option>
+                <option value="awx">awx</option>
+                <option value="sonarqube">sonarqube</option>
+                <option value="jaeger">jaeger</option>
+                <option value="opensearch">opensearch</option>
+                <option value="istio">istio</option>
+                <option value="kiali">kiali</option>
+                <option value="kafka">kafka</option>
+                <option value="kafka-kraft">kafka-kraft</option>
+                <option value="strimzi-kafka">strimzi-kafka</option>
+                <option value="appsim">appsim</option>
+                <option value="loki">loki</option>
+                <option value="loki-operator">loki-operator</option>
+                <option value="tempo">tempo</option>
+                <option value="tempo-operator">tempo-operator</option>
+                <option value="otel">otel</option>
+                <option value="otel-operator">otel-operator</option>
+                <option value="observability">observability</option>
+                <option value="observability-operator">observability-operator</option>
+                <option value="appsim-gitops">appsim-gitops</option>
+                <option value="appsim-boutique">appsim-boutique</option>
+                <option value="appsim-events">appsim-events</option>
+                <option value="appsim-awx">appsim-awx</option>
+                <option value="appsim-cicd">appsim-cicd</option>
+                <option value="appsim-mesh">appsim-mesh</option>
+                <option value="appsim-bookinfo">appsim-bookinfo</option>
+                <option value="appsim-emojivoto">appsim-emojivoto</option>
+                <option value="appsim-all">appsim-all</option>
+              </select><small id="devops-help">Hold Command (Mac) or Control to choose multiple components. Leave empty to skip.</small></label>
+              <label>Teardown delay<input id="autodestroy-at" pattern="[1-9][0-9]*m?" placeholder="Same as duration (e.g. 2 or 30m)"><small>Hours as a number, or minutes with m.</small></label>
+            </div>
+
+            <div class="grid">
+              <label><input type="checkbox" id="monitoring">Enable monitoring & alerting<small>Requires at least one schedulable node with more than 12 GB RAM.</small></label>
+              <label><input type="checkbox" id="rebuild-image">Rebuild CoreOS snapshot</label>
+              <label><input type="checkbox" id="letsencrypt-prod">Use Let's Encrypt production CA (browser-trusted; rate-limited)</label>
+            </div>
+          </div>
+        </div>
       </section>
-      <section class="card">
-        <h2>3. Review and start</h2>
-        <p id="effect"></p>
-        <p class="muted">Runs the existing procedure non-interactively. Deploy skips password-based admin creation. Destroy keeps shared snapshots and local install artifacts.</p>
-        <p>Command: <code id="command"></code></p>
-        <label id="confirm-label" for="confirm">Confirm operation</label><input id="confirm" autocomplete="off" required spellcheck="false">
-        <div class="row"><button id="start" type="submit">Start deploy</button><a id="follow-link" href="/">Open live cluster status →</a></div>
-      </section>
+
+      <div class="dashboard">
+        <section class="card">
+          <h2>4. Review and start</h2>
+          <div class="lifecycle-illustration">
+            <div class="lifecycle-step">
+              <div class="lifecycle-icon">1</div>
+              <div class="lifecycle-line"></div>
+              <div class="lifecycle-description">Cluster configuration</div>
+            </div>
+            <div class="lifecycle-step">
+              <div class="lifecycle-icon">2</div>
+              <div class="lifecycle-line"></div>
+              <div class="lifecycle-description">Infrastructure provisioning</div>
+            </div>
+            <div class="lifecycle-step">
+              <div class="lifecycle-icon">3</div>
+              <div class="lifecycle-line"></div>
+              <div class="lifecycle-description">OKD installation</div>
+            </div>
+            <div class="lifecycle-step">
+              <div class="lifecycle-icon">4</div>
+              <div class="lifecycle-description">Cluster ready</div>
+            </div>
+          </div>
+
+          <p id="effect"></p>
+          <p class="muted">Runs the existing procedure non-interactively. Deploy skips password-based admin creation. Destroy keeps shared snapshots and local install artifacts.</p>
+
+
+          <p>Command: <code id="command"></code></p>
+          <label id="confirm-label" for="confirm">Confirm operation</label><input id="confirm" autocomplete="off" required spellcheck="false">
+          <div class="row"><button id="start" type="submit">Start deploy</button><a id="follow-link" href="/">Open live cluster status →</a></div>
+        </section>
+
+        <aside class="sidebar">          <div class="topology-container">
+            <h3>Planned topology</h3>
+            <div class="topology" id="topology">
+              <div class="node master" id="master-node">
+                <div class="node-count">3 masters</div>
+              </div>
+              <div class="connection connection-master"></div>
+              <div class="node worker" id="worker-node">
+                <div class="node-count">3 workers</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Deployment summary</h3>
+            <div id="summary">
+              <div class="chip info">Profile: Production — cost optimized</div>
+              <div class="chip info">Masters: 3</div>
+              <div class="chip info">Workers: 3</div>
+              <div class="chip info">Region: Current configured region</div>
+              <div class="chip info">OKD release: Current configured release</div>
+              <div class="chip info">Duration: 8h</div>
+              <div class="chip info">Autodestroy: Enabled</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>Important notes</h3>
+            <p>This is a preview of your planned deployment. The actual cloud status will be shown on the status page after deployment begins.</p>
+            <p>Advanced operations like scale, rescale, autoscale, and DEFCON are only available through the terminal. Use the CLI for these operations.</p>
+            <p class="warning">Monitoring requires at least one schedulable node with more than 12 GB RAM. If you enable monitoring, ensure your nodes meet this requirement.</p>
+          </div>
+        </aside>
+      </div>
     </fieldset>
   </form>
+
   <p id="message" role="status" aria-live="polite"></p>
-  <section class="card" id="output" hidden><h2>Latest browser operation</h2><p id="job-state"></p><pre id="tail"></pre><small>Operator-only output may include credentials. Full output is in logs/web-CLUSTER.log on the server.</small></section>
+
+  <section class="card" id="output" hidden>
+    <h2>Latest browser operation</h2>
+    <p id="job-state"></p>
+    <pre id="tail"></pre>
+    <small>Operator-only output may include credentials. Full output is in logs/web-CLUSTER.log on the server.</small>
+  </section>
 </main>
+
 <script>
 const $ = id => document.getElementById(id);
 let token = '', unlocked = false, busy = false, sending = false, polling = false;
 let jobs = {};
 const requestedCluster = new URLSearchParams(location.search).get('cluster');
 const operation = () => document.querySelector('input[name=operation]:checked').value;
+
+function plannedTopology() {
+  if (operation() !== 'deploy' || $('cluster').value !== 'legacy') return null;
+  const profile = $('profile').value;
+  if (profile === '3') return $('lab-topology').value.split('x').map(Number);
+  if (profile === '4') return [Number($('masters').value), Number($('workers').value)];
+  return [3, 3];
+}
+
+let topologyKey = '';
+function updateTopology() {
+  const counts = plannedTopology();
+  const key = JSON.stringify(counts);
+  if (topologyKey === key) return;
+  topologyKey = key;
+  const host = $('topology');
+  host.replaceChildren();
+  if (!counts) {
+    const note = document.createElement('p');
+    note.className = 'muted';
+    note.textContent = operation() === 'deploy' ? 'Topology is managed by the selected cluster YAML.' : 'This operation uses the cluster’s recorded configuration.';
+    host.append(note);
+    return;
+  }
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 300 190');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', `Planned topology: ${counts[0]} control-plane nodes and ${counts[1]} workers`);
+  const draw = (tag, attrs, text) => {
+    const el = document.createElementNS(ns, tag);
+    for (const [k,v] of Object.entries(attrs)) el.setAttribute(k,v);
+    if (text !== undefined) el.textContent = text;
+    svg.append(el); return el;
+  };
+  draw('path', {d:'M150 64 V95 M45 95 H255 M150 95 V122', class:'network-line'});
+  for (const [role, count] of counts.entries()) {
+    const shown = Math.min(5, Math.max(0, count));
+    for (let i=0;i<shown;i++) {
+      const x = 150 + (i-(shown-1)/2)*48, y = role ? 137 : 42;
+      draw('path', {d:`M${x} ${role ? 122 : 57} V95`, class:'network-line'});
+      draw('rect', {x:x-17,y:y-15,width:34,height:30,rx:7,class:role?'server worker':'server master'});
+      draw('path', {d:`M${x-8} ${y-4} H${x+8} M${x-8} ${y+4} H${x+3}`,class:'server-detail'});
+    }
+    draw('text',{x:150,y:role?181:80,'text-anchor':'middle',class:'network-label'}, `${count} ${role ? 'worker' : 'control-plane'} node${count === 1 ? '' : 's'}`);
+  }
+  if (counts[1] === 0) draw('text', {x:150,y:139,'text-anchor':'middle',class:'network-label'}, 'Workloads run on control plane');
+  host.append(svg);
+  const note = document.createElement('small');
+  note.textContent = 'Planned layout · excludes temporary bootstrap and ignition hosts';
+  host.append(note);
+}
+
+function updateSummary() {
+  const summary = $('summary');
+  const values = [['Cluster', $('cluster').value], ['Operation', operation()]];
+  const counts = plannedTopology();
+  if (counts) {
+    values.push(['Profile', $('profile').selectedOptions[0].textContent.split(' (')[0]],
+      ['Nodes', `${counts[0]} control plane / ${counts[1]} workers`],
+      ['Region', $('region').value || 'Configured region'],
+      ['Release', $('release').value || 'Configured release'],
+      ['Teardown', $('autodestroy').checked ? 'After ' + (options()['autodestroy-at'] || $('duration').value) + (/m$/.test(options()['autodestroy-at'] || $('duration').value) ? '' : 'h') : 'Not scheduled']);
+    const opts = options();
+    if (opts.monitoring) values.push(['Monitoring','Enabled']);
+    if (opts.letsencrypt) values.push(['Certificates', opts['letsencrypt-prod'] ? 'Production CA' : 'Staging CA']);
+    if (opts['devops-components']) values.push(['DevOps', opts['devops-components'].split(',').join(', ')]);
+  } else values.push(['Settings', 'Recorded cluster configuration']);
+  summary.replaceChildren(...values.map(([label,value]) => {
+    const row = document.createElement('div'); row.className = 'summary-row';
+    const name = document.createElement('span'); name.textContent = label;
+    const content = document.createElement('strong'); content.textContent = value;
+    row.append(name,content); return row;
+  }));
+}
+
 function options() {
   if (operation() !== 'deploy' || $('cluster').value !== 'legacy') return {};
   const fields = ['profile','region','release','duration'];
@@ -99,50 +1010,108 @@ function options() {
   const result = {};
   for (const key of fields) if ($(key).value.trim()) result[key] = $(key).value.trim();
   result['no-autodestroy'] = !$('autodestroy').checked;
+  if ($('advanced-toggle').checked) {
+    for (const key of ['storage-backend','version-policy']) result[key] = $(key).value;
+    for (const key of ['monitoring','rebuild-image']) if ($(key).checked) result[key] = true;
+    if ($('autodestroy').checked && $('autodestroy-at').value.trim()) result['autodestroy-at'] = $('autodestroy-at').value.trim();
+    if ($('letsencrypt').value) {
+      result.letsencrypt = true;
+      if ($('letsencrypt-prod').checked) result['letsencrypt-prod'] = true;
+      if ($('le-email').value.trim()) result['le-email'] = $('le-email').value.trim();
+    }
+    const components = Array.from($('devops-components').selectedOptions, opt => opt.value);
+    if (components.length) result['devops-components'] = components.join(',');
+  }
   return result;
 }
+
 function render() {
   const op = operation(), cluster = $('cluster').value, legacy = cluster === 'legacy';
   const settings = op === 'deploy' && legacy;
   $('settings').hidden = !settings;
-  $('settings').querySelectorAll('input,select').forEach(el => el.disabled = !settings);
+  $('settings').querySelectorAll('input,select,button').forEach(el => el.disabled = !settings);
   for (const [id, profile] of [['lab','3'],['manual','4']]) {
     $(id).hidden = !settings || $('profile').value !== profile;
     $(id).disabled = $(id).hidden;
   }
-  $('config-note').textContent = legacy ? 'Uses the repository .env and install-config.yaml. Configure credentials on the host before deploying.' : `Uses clusters/${cluster}.yaml and its isolated workspace. Edit that file on the host to change deployment settings.`;
+  const advanced = settings && $('advanced-toggle').checked;
+  $('advanced-content').hidden = !advanced;
+  $('advanced-content').classList.toggle('show', advanced);
+  $('advanced-toggle').setAttribute('aria-expanded', String(advanced));
+  $('advanced-content').querySelectorAll('input,select').forEach(el => el.disabled = !advanced);
+  for (const id of ['le-email','letsencrypt-prod']) {
+    $(id).disabled = !advanced || !$('letsencrypt').value;
+    $(id).closest('label').hidden = !$('letsencrypt').value;
+  }
+  $('autodestroy-at').disabled = !advanced || !$('autodestroy').checked;
+  $('autodestroy-at').closest('label').hidden = !$('autodestroy').checked;
+  $('config-note').textContent = legacy ? 'Uses the repository .env and install-config.yaml. Credentials must be configured on the host.' : `Uses clusters/${cluster}.yaml and its isolated workspace. Edit that file on the host to change deployment settings.`;
   const href = '/?cluster=' + encodeURIComponent(cluster);
   $('status-link').href = href; $('follow-link').href = href;
   $('effect').textContent = op === 'destroy' ? `Permanently delete the infrastructure and cluster data for ${cluster}.` : op === 'resume' ? `Resume ${cluster} using its recorded configuration and existing credentials.` : `Deploy ${cluster}. This provisions billable cloud resources.`;
   $('effect').className = op === 'destroy' ? 'danger' : '';
   const cmd = [`./${op === 'destroy' ? 'destroy' : 'deploy'}-okd.sh`, '--yes'];
-  if (!legacy) cmd.push('--cluster', cluster);
+  if (!legacy) cmd.push('--cluster',cluster);
   if (op === 'resume') cmd.push('--resume');
+  // Quote values for a copyable preview. The server invokes argv directly.
+  const quote = value => /^[a-zA-Z0-9_.,:@/-]+$/.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
   for (const [key,value] of Object.entries(options())) {
     if (value === true) cmd.push('--' + key);
-    else if (value !== false) cmd.push('--' + key, value);
+    else if (value !== false) cmd.push('--' + key,quote(value));
   }
   $('command').textContent = cmd.join(' ');
   $('confirm-label').textContent = `Type “${op} ${cluster}” to confirm`;
   $('confirm').placeholder = `${op} ${cluster}`;
+  const confirmed = $('confirm').value === `${op} ${cluster}`;
   $('start').textContent = sending ? 'Starting…' : `Start ${op}`;
-  $('start').disabled = !unlocked || busy || sending;
+  $('start').classList.toggle('destructive', op === 'destroy');
+  $('start').disabled = !unlocked || busy || sending || !confirmed;
+  document.querySelectorAll('[data-profile]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.profile === $('profile').value)));
+  updateTopology(); updateSummary(); renderSnapshotGuide();
 }
+
+function renderSnapshotGuide() {
+  const cluster = $('cluster').value;
+  const scope = cluster === 'legacy' ? '' : ' --cluster ' + cluster;
+  const id = $('snapshot-restore-id').value.trim();
+  const snapshot = /^[a-zA-Z0-9_-]{1,80}$/.test(id) ? id : 'SNAPSHOT_ID';
+  $('snapshot-guide-cluster').textContent = cluster === 'legacy' ? 'Commands for legacy · repository workspace' : `Commands for ${cluster} · isolated cluster workspace`;
+  $('snapshot-destroy-command').textContent = './destroy-okd.sh' + scope + ' --snapshot-before-destroy';
+  $('snapshot-list-command').textContent = './deploy-okd.sh' + scope + ' --snapshot-list';
+  $('snapshot-restore-command').textContent = './deploy-okd.sh' + scope + ' --restore-snapshot ' + snapshot + ' --no-autodestroy';
+  $('snapshot-discover-command').textContent = './deploy-okd.sh' + scope + ' --snapshot-cloud-list';
+  $('snapshot-template-command').textContent = './deploy-okd.sh' + scope + ' --snapshot-import-template snapshot-import.json';
+  $('snapshot-import-plan-command').textContent = './deploy-okd.sh' + scope + ' --snapshot-import-plan snapshot-import.json';
+  $('snapshot-import-command').textContent = './deploy-okd.sh' + scope + ' --snapshot-import snapshot-import.json';
+}
+$('snapshot-restore-id').addEventListener('input', renderSnapshotGuide);
+$('snapshot-guide').addEventListener('click', async event => {
+  const button = event.target.closest('button[data-copy-command]');
+  if (!button) return;
+  try {
+    await navigator.clipboard.writeText($(button.dataset.copyCommand).textContent);
+    $('snapshot-copy-status').textContent = 'Command copied. Review it in your terminal before running it.';
+  } catch {
+    $('snapshot-copy-status').textContent = 'Clipboard access is unavailable. Select and copy the command above.';
+  }
+});
 async function api(path, body) {
-  const r = await fetch(path, {method:body ? 'POST' : 'GET', cache:'no-store',
-    headers:{Authorization:'Bearer ' + token, ...(body ? {'Content-Type':'application/json'} : {})},
-    ...(body ? {body:JSON.stringify(body)} : {})});
+  const r = await fetch(path, {method: body ? 'POST' : 'GET', cache: 'no-store',
+    headers: {Authorization: 'Bearer ' + token, ...(body ? {'Content-Type': 'application/json'} : {})},
+    ...(body ? {body: JSON.stringify(body)} : {})});
   const result = await r.json();
   if (!r.ok) throw new Error(result.error || `Request failed (${r.status})`);
   return result;
 }
+
 async function refresh() {
   if (!unlocked || polling) return;
   polling = true;
   const cluster = $('cluster').value;
   try {
-    const data = await api('/control.json'); jobs = data.jobs;
-    const r = await fetch('/status.json?cluster=' + encodeURIComponent(cluster), {cache:'no-store'});
+    const data = await api('/control.json');
+    jobs = data.jobs;
+    const r = await fetch('/status.json?cluster=' + encodeURIComponent(cluster), {cache: 'no-store'});
     if (!r.ok) throw new Error('Could not read cluster status.');
     const s = await r.json();
     if (cluster !== $('cluster').value) return;
@@ -156,47 +1125,82 @@ async function refresh() {
     }
     render();
   } catch (e) {
-    busy = true; render();
+    busy = true;
+    render();
     $('cluster-state').textContent = 'Status unavailable; reconnect before starting an operation.';
     $('message').textContent = e.message;
-  } finally { polling = false; }
+  } finally {
+    polling = false;
+  }
 }
+
 $('access').addEventListener('submit', async e => {
-  e.preventDefault(); token = $('token').value.trim();
+  e.preventDefault();
+  token = $('token').value.trim();
   try {
     const data = await api('/control.json');
     const selected = unlocked ? $('cluster').value : requestedCluster;
     $('cluster').replaceChildren(...data.clusters.map(c => new Option(c === 'legacy' ? 'legacy — repository .env' : c, c)));
     if (data.clusters.includes(selected)) $('cluster').value = selected;
-    unlocked = true; $('controls').disabled = false; $('access-state').textContent = 'Unlocked';
-    $('message').textContent = ''; busy = true; render(); await refresh();
+    unlocked = true;
+    $('controls').disabled = false;
+    $('access-state').textContent = 'Unlocked';
+    $('message').textContent = '';
+    busy = true;
+    render();
+    await refresh();
   } catch (e) {
-    unlocked = false; $('controls').disabled = true; $('access-state').textContent = 'Locked';
-    $('output').hidden = true; $('tail').textContent = ''; $('message').textContent = e.message;
+    unlocked = false;
+    $('controls').disabled = true;
+    $('access-state').textContent = 'Locked';
+    $('output').hidden = true;
+    $('tail').textContent = '';
+    $('message').textContent = e.message;
   }
 });
+
+document.querySelectorAll('[data-profile]').forEach(button => button.addEventListener('click', () => {
+  $('profile').value = button.dataset.profile;
+  render();
+}));
 $('operation-form').addEventListener('input', render);
 $('operation-form').addEventListener('change', e => {
   if (e.target.id === 'cluster' || e.target.name === 'operation') $('confirm').value = '';
   if (e.target.id === 'cluster') {
-    busy = true; $('output').hidden = true;
+    busy = true;
+    $('output').hidden = true;
     history.replaceState(null, '', '/manage?cluster=' + encodeURIComponent($('cluster').value));
     refresh();
   }
   render();
 });
+
 $('operation-form').addEventListener('submit', async e => {
-  e.preventDefault(); if (busy || sending || !unlocked) return;
-  sending = true; render();
+  e.preventDefault();
+  if (busy || sending || !unlocked) return;
+  sending = true;
+  render();
   try {
-    const result = await api('/operations', {cluster:$('cluster').value, operation:operation(), options:options(), confirm:$('confirm').value});
-    busy = true; $('confirm').value = '';
+    const result = await api('/operations', {
+      cluster: $('cluster').value,
+      operation: operation(),
+      options: options(),
+      confirm: $('confirm').value
+    });
+    busy = true;
+    $('confirm').value = '';
     $('message').textContent = `${result.operation} started for ${result.cluster}. Use “Open live cluster status” to follow the procedure.`;
     await refresh();
-  } catch (e) { $('message').textContent = e.message; }
-  finally { sending = false; render(); }
+  } catch (e) {
+    $('message').textContent = e.message;
+  } finally {
+    sending = false;
+    render();
+  }
 });
-render(); setInterval(refresh, 3000);
+
+render();
+setInterval(refresh, 3000);
 </script>
 </body>
 </html>

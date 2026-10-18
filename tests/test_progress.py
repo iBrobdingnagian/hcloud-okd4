@@ -195,6 +195,33 @@ class ControlsFixture(unittest.TestCase):
 
 
 class ControlsTests(ControlsFixture):
+    def test_advanced_deployment_options_map_to_script_arguments(self):
+        options = {'monitoring': True, 'rebuild-image': True,
+                   'letsencrypt': True, 'letsencrypt-prod': True,
+                   'le-email': 'ops@example.com', 'autodestroy-at': '90m',
+                   'devops-components': 'argocd,loki-operator,appsim-boutique',
+                   'storage-backend': 'smb', 'version-policy': 'latest'}
+        args = self.controls.command(self.request(**options))
+        for key, value in options.items():
+            index = args.index('--' + key)
+            if value is not True:
+                self.assertEqual(args[index + 1], value)
+        self.assertNotIn('--devops', args)  # Explicit list prevents an interactive picker.
+
+    def test_advanced_options_reject_injection_and_conflicting_settings(self):
+        invalid = [
+            {'monitoring': 'true'}, {'rebuild-image': 1},
+            {'devops-components': 'argocd,--help'},
+            {'devops-components': 'argocd,unknown'},
+            {'storage-backend': 'remote'}, {'version-policy': 'unstable'},
+            {'letsencrypt-prod': True}, {'le-email': 'ops@example.com'},
+            {'letsencrypt': True, 'le-email': 'ops@example.com\n--help'},
+            {'no-autodestroy': True, 'autodestroy-at': '8'},
+        ]
+        for options in invalid:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.controls.command(self.request(**options))
+
     def test_commands_use_existing_scripts_and_pinned_configuration(self):
         self.assertEqual(self.controls.clusters(), ['legacy', 'dev'])
         self.assertEqual(self.controls.command(self.request('resume', 'dev')),

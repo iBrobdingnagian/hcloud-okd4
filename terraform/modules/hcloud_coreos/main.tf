@@ -1,11 +1,11 @@
 resource "hcloud_server" "server" {
   count       = var.instance_count
   name        = "${format("${var.name}%02d", count.index + 1)}.${var.dns_domain}"
-  image       = var.image
+  image       = try(var.restore_nodes[format("%s%02d.%s", var.name, count.index + 1, var.dns_domain)].image, var.image)
   server_type = coalesce(try(var.server_types[count.index], ""), var.server_type)
   keep_disk   = var.keep_disk
   ssh_keys    = var.ssh_keys
-  user_data = templatefile("${path.module}/templates/ignition.ign", {
+  user_data = contains(keys(var.restore_nodes), format("%s%02d.%s", var.name, count.index + 1, var.dns_domain)) ? null : templatefile("${path.module}/templates/ignition.ign", {
     hostname         = format("%s%02d.%s", var.name, count.index + 1, var.dns_domain)
     hostname_b64     = base64encode(format("%s%02d.%s", var.name, count.index + 1, var.dns_domain))
     resolvconf_b64   = base64encode(file("${path.module}/templates/resolv.conf"))
@@ -17,6 +17,15 @@ resource "hcloud_server" "server" {
   labels       = var.labels
   backups      = var.backups
   firewall_ids = var.firewall_ids
+  dynamic "public_net" {
+    for_each = contains(keys(var.restore_nodes), format("%s%02d.%s", var.name, count.index + 1, var.dns_domain)) ? [var.restore_nodes[format("%s%02d.%s", var.name, count.index + 1, var.dns_domain)]] : []
+    content {
+      ipv4_enabled = true
+      ipv6_enabled = true
+      ipv4         = public_net.value.ipv4
+      ipv6         = public_net.value.ipv6
+    }
+  }
   lifecycle {
     # `location` is create-only (forces replacement). The hcloud API can report a
     # null datacenter/location for an already-running server, which the provider

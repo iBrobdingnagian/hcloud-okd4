@@ -53,6 +53,69 @@ types, OKD release, lab duration, etc.). Without `--yes` both scripts walk you
 through interactive prompts (region picker, live pricing, version selection,
 htpasswd admin creation).
 
+### Save a cluster before teardown and restore it later
+
+See the [restore runbook](readme/CLUSTER_RESTORE.md) for prerequisites,
+verification, retry steps and the recorded restore operation.
+For existing Hetzner snapshots that have no local record, use
+`--snapshot-cloud-list`, create a `--snapshot-import-template FILE`, validate it
+with `--snapshot-import-plan FILE`, then record it with `--snapshot-import FILE`.
+Import requires original state, matching installation files and retained node
+IPs; it does not start a restore or change any cloud resource.
+
+```bash
+# Opt in while deploying: manual and scheduled teardown will snapshot first.
+./deploy-okd.sh --cluster dev --snapshot-before-destroy --yes
+
+# Or snapshot an existing cluster immediately before destroying it.
+./destroy-okd.sh --cluster dev --snapshot-before-destroy --yes
+
+# Find a completed snapshot set, then restore this same cluster.
+./deploy-okd.sh --cluster dev --snapshot-list
+./deploy-okd.sh --cluster dev --restore-snapshot SNAPSHOT_ID --no-autodestroy --yes
+```
+
+Omit `--cluster dev` for the legacy repository workspace. The deploy flag saves
+the preference in that workspace; `--no-snapshot-before-destroy` disables it.
+On destroy, that flag is a one-time override of the saved preference. Scheduled
+teardown captures the snapshot preference when its timer is created.
+
+This is an **experimental cold node-disk restore**, not a fresh OKD install or
+a general etcd disaster recovery procedure. Before teardown, the script verifies
+cluster health, gracefully stops every node, waits until all nodes are off, and
+creates a protected Hetzner snapshot of each disk. Any failure stops teardown;
+nodes may remain stopped and partial snapshot images may remain billable.
+Inspect the failed manifest and nodes before restarting or retrying teardown.
+
+The snapshots, original node IPv4/IPv6 Primary IPs, and local
+`.cluster-snapshots/SNAPSHOT_ID/` bundle are retained. **Snapshots and retained
+IPv4 addresses continue to incur charges after the servers are deleted.** Keep
+the bundle (which contains sensitive kubeconfig/installer artifacts), original
+SSH key, cluster YAML and credentials securely. Named-cluster bundles are under
+`.work/NAME/.cluster-snapshots/`; legacy bundles are in the repository workspace.
+The original toolbox image must remain available. A complete snapshot restore
+does not require the original shared CoreOS/Packer image; fresh deployments and
+new nodes without a saved snapshot still require a matching base image.
+
+Restore verifies snapshot ownership, original IP availability, domain, region,
+release and cluster identity, restores the original install artifacts, and uses
+Terraform to recreate servers from their own saved disks and retained IPs. It
+recreates the load balancer and DNS without invoking the installer or Ansible.
+The load balancer can receive a new address; its DNS records are updated.
+Current cloud credentials are kept. If an apply or health check fails, resolve
+the cause and repeat the same `--restore-snapshot SNAPSHOT_ID` command; only the
+exact interrupted restore is eligible for retry. A successful restore is reported
+only after API, node and operator health checks pass. Automatic teardown after
+restore defaults to the configured lab duration; use `--no-autodestroy` to keep it.
+
+Only completed, Terraform-managed clusters with node-local disks and public
+Primary IPs are supported. Attached Hetzner volumes, private node networks and
+unmanaged/autoscaled nodes are rejected before shutdown. Disable any resident
+cluster-autoscaler first. SMB/external storage is not backed up by disk snapshots
+and must be retained/backed up separately. Certificate expiry or unsupported
+external integrations can still require recovery work after a long shutdown.
+The snapshot and restore flags are currently CLI controls.
+
 ### Browser deploy / destroy controls
 
 Deploy and destroy automatically start the existing Python progress server on
@@ -74,6 +137,14 @@ An already-running server must be restarted once to load the new routes.
 Choose `legacy` for the repository `.env`, or a configured `clusters/NAME.yaml`
 for an isolated cluster. Legacy deploy exposes profiles, lab topology/tier,
 manual node counts/types, region, release, duration, and automatic teardown.
+Advanced deployment settings expose monitoring, explicit DevOps components,
+local/SMB storage, operator version policy, image rebuilds, Let's Encrypt
+certificates, and a separate teardown delay. These map to the same flags in
+`./deploy-okd.sh --help`. Monitoring requires a schedulable node with more than
+12 GB RAM. Production certificates require the production CA checkbox;
+the default CA is staging. Server-side validation rejects unsupported values.
+The topology graphic previews the selected legacy profile; it is not live
+cluster health. Scale, rescale, autoscaling, and DEFCON remain CLI operations.
 Named clusters use their YAML settings; resume uses recorded checkpoints.
 Credentials and cluster configuration must already be prepared on the host.
 Review the command and type the displayed operation and cluster name to start.
@@ -581,3 +652,26 @@ export CLOUDFLARE_API_KEY=YOUR_API_KEY
 ## Author
 
 [slauger](https://github.com/slauger)
+
+
+## Current project consumption report
+
+Actual current usage is available at https://console.hetzner.com/usage.
+The public Cloud API token does not expose this usage table. This report uses a
+saved snapshot of the Console values, with actual charges per project.
+
+Open `report/index.html` for charts and CSV/JSON exports. To update, capture the
+Console values into `report/usage.json`: `period`, `currency`, `vat_rate`,
+`captured_at` (ISO timestamp), `source` (Console usage URL), `total`, and `projects`
+entries containing `name` and decimal `amount`. Totals must reconcile.
+Use `tax_basis: "inclusive"` or `"exclusive"` only when verified in the Console;
+a VAT rate alone does not establish whether the amounts include VAT. The report
+shows capture age prominently and never treats page reload as a usage refresh.
+
+```bash
+python3 scripts/hetzner_billing_report.py
+```
+
+This regenerates the report from the snapshot; it does not fetch new usage.
+Options: `--input PATH`, `--output PATH`. No resource cost estimates are used.
+Generated reports are private and ignored by Git.

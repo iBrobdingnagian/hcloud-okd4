@@ -25,7 +25,7 @@ module "bootstrap" {
   dns_domain      = var.dns_domain
   dns_zone_id     = var.dns_zone_id
   dns_internal_ip = false
-  image           = data.hcloud_image.image.id
+  image           = local.node_base_image
   image_name      = var.image
   server_type     = var.server_type_bootstrap
   subnet          = hcloud_network_subnet.subnet.id
@@ -36,12 +36,13 @@ module "bootstrap" {
 module "master" {
   source          = "./modules/hcloud_coreos"
   instance_count  = var.replicas_master
+  restore_nodes   = var.restore_nodes
   location        = var.location
   name            = "master"
   dns_domain      = var.dns_domain
   dns_zone_id     = var.dns_zone_id
   dns_internal_ip = false
-  image           = data.hcloud_image.image.id
+  image           = local.node_base_image
   image_name      = var.image
   server_type     = var.server_type_master
   server_types    = var.server_types_master == "" ? [] : split(",", var.server_types_master)
@@ -58,12 +59,13 @@ module "master" {
 module "worker" {
   source          = "./modules/hcloud_coreos"
   instance_count  = var.replicas_worker
+  restore_nodes   = var.restore_nodes
   location        = var.location
   name            = "worker"
   dns_domain      = var.dns_domain
   dns_zone_id     = var.dns_zone_id
   dns_internal_ip = false
-  image           = data.hcloud_image.image.id
+  image           = local.node_base_image
   image_name      = var.image
   server_type     = var.server_type_worker
   server_types    = var.server_types_worker == "" ? [] : split(",", var.server_types_worker)
