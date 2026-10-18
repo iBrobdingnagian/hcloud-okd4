@@ -88,7 +88,7 @@ def load_config(repo, name):
     data = mapping(yaml.safe_load(path.read_text()), (
         'name', 'domain', 'zone_id', 'release', 'region', 'network_zone', 'masters',
         'workers', 'master_type', 'worker_type', 'ignition_type', 'credentials_file',
-        'ssh_private_key', 'pull_secret_file', 'network', 'duration', 'autodestroy',
+        'ssh_private_key', 'pull_secret_file', 'distribution', 'network', 'duration', 'autodestroy',
     ), str(path))
     if data.get('name') != name:
         raise ConfigError(f'{path}: name must match --cluster {name}')
@@ -98,6 +98,12 @@ def load_config(repo, name):
         raise ConfigError('domain must be a cluster hostname, e.g. dev.example.com')
     token(data.get('zone_id'), r'[A-Za-z0-9_-]+', 'zone_id')
     token(data.get('release'), r'[0-9]+\.[0-9]+\.[A-Za-z0-9_.-]+', 'release (full pinned tag)')
+    if data.setdefault('distribution', 'okd') not in ('okd', 'openshift'):
+        raise ConfigError('distribution must be okd or openshift')
+    if data['distribution'] == 'openshift':
+        token(data['release'], r'4\.[0-9]+\.[0-9]+', 'pinned OpenShift release')
+        if not data.get('pull_secret_file'):
+            raise ConfigError('OpenShift requires pull_secret_file')
     for key in ('region', 'network_zone', 'master_type', 'worker_type', 'ignition_type'):
         token(data.get(key), r'[a-z0-9-]+', key)
     for key in ('masters', 'workers'):
@@ -144,7 +150,7 @@ def config_env(data):
     return {
         'TF_VAR_cluster_id': data['name'], 'TF_VAR_dns_domain': data['domain'],
         'TF_VAR_dns_zone_id': data['zone_id'], 'OPENSHIFT_RELEASE': data['release'],
-        'DEPLOYMENT_TYPE': 'okd', 'TF_VAR_location': data['region'],
+        'DEPLOYMENT_TYPE': data.get('distribution', 'okd'), 'TF_VAR_location': data['region'],
         'TF_VAR_network_zone': data['network_zone'],
         'TF_VAR_replicas_master': str(data['masters']), 'TF_VAR_replicas_worker': str(data['workers']),
         'TF_VAR_server_type_master': data['master_type'], 'TF_VAR_server_type_worker': data['worker_type'],
@@ -203,6 +209,12 @@ def prepare(repo, name, operation, resume=False):
     pull_secret = '{"auths":{"none":{"auth":"none"}}}'
     if data.get('pull_secret_file'):
         pull_secret = json.dumps(json.loads((repo / data['pull_secret_file']).read_text()))
+    if data.get('distribution') == 'openshift':
+        from openshift_config import validate_pull_secret
+        try:
+            validate_pull_secret(pull_secret)
+        except (ValueError, AttributeError, TypeError):
+            raise ConfigError('OpenShift requires valid Red Hat registry credentials in pull_secret_file')
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     work.chmod(0o700)
     values = config_env(data)
@@ -274,7 +286,212 @@ def preview(repo, name):
     print('Configuration preview only; no cloud changes. Use --terraform-plan after ignition/image preparation for a provider resource diff.')
 
 
+def offer_resume(work, args):
+    if not (work / '.phases/configured').exists() or (work / '.phases/ready').exists():
+        return args
+    if '--resume' in args:
+        return args
+    if (work / '.phases/ignition').exists():
+        required = ['ignition/auth/kubeconfig', 'ignition/bootstrap.ign', 'ignition/master.ign', 'ignition/worker.ign']
+        if any(not (work / name).is_file() or not (work / name).stat().st_size for name in required):
+            raise ConfigError(f'{work}: checkpoints exist but original installation artifacts are missing; recover the original files before resuming')
+    overrides = ('--region', '--release', '--masters', '--workers', '--master-type', '--worker-type', '--profile', '--pull-secret-file')
+    if any(flag in args for flag in overrides):
+        raise ConfigError('installation already started; use --resume without topology/release overrides')
+    if not sys.stdin.isatty() or '--yes' in args:
+        raise ConfigError('installation already started; use --resume to preserve its original settings and credentials')
+    values = read_env(work / '.env')
+    print(f'Unfinished {values.get("DEPLOYMENT_TYPE", "okd")} installation: '
+          f'{values.get("OPENSHIFT_RELEASE")} · {values.get("TF_VAR_location")} · '
+          f'{values.get("TF_VAR_replicas_master")} masters / {values.get("TF_VAR_replicas_worker")} workers', flush=True)
+    choice = input('Resume using these saved settings and credentials? [Y/n]: ').strip().lower()
+    if choice not in ('', 'y', 'yes'):
+        raise ConfigError('cancelled; saved installation files were preserved')
+    return [*args, '--resume']
+
+
+def save_region_selection(config_path, work):
+    """Persist a fresh interactive region choice for subsequent lifecycle commands."""
+    config_path, work = Path(config_path), Path(work)
+    if (work / '.phases/configured').exists():
+        raise ConfigError('cannot change the region of a configured cluster')
+    values = read_env(work / '.env')
+    data = yaml.safe_load(config_path.read_text())
+    identity = json.loads((work / 'cluster.json').read_text())
+    for key in ('name', 'domain', 'distribution', 'release'):
+        if data.get(key, 'okd' if key == 'distribution' else None) != identity.get(key, 'okd' if key == 'distribution' else None):
+            raise ConfigError('cluster identity changed during region selection')
+    for key, env_key in (('region', 'TF_VAR_location'), ('network_zone', 'TF_VAR_network_zone')):
+        value = token(values.get(env_key), r'[a-z0-9-]+', key)
+        data[key] = identity[key] = value
+    atomic_write(config_path, yaml.safe_dump(data, sort_keys=False))
+    atomic_write(work / 'cluster.json', json.dumps(identity, indent=2) + '\n')
+
+
+def route_distribution(repo, operation, args):
+    """Choose the distribution before loading or writing any workspace files."""
+    args = list(args)
+    if any(flag in args for flag in ('--cluster', '--help', '-h', '--plan')):
+        return args
+    # Day-two operations use their recorded identity, including unattended teardown.
+    recorded_operations = ('--resume', '--terraform-plan', '--restore-snapshot',
+                           '--snapshot-list', '--snapshot-cloud-list', '--snapshot-import-template',
+                           '--snapshot-import-plan', '--snapshot-import', '--scale', '--rescale',
+                           '--autoscale', '--admin', '--monitoring', '--devops', '--devops-components',
+                           '--cluster-autoscaler', '--ca-smoke-test', '--defcon')
+    if any(flag in args for flag in recorded_operations):
+        return args
+    interactive = sys.stdin.isatty() and '--yes' not in args
+    distribution = None
+    if '--distribution' in args:
+        index = args.index('--distribution')
+        if index + 1 == len(args) or args.count('--distribution') != 1:
+            raise ConfigError('--distribution needs one value: okd or openshift')
+        distribution = args[index + 1]
+    elif interactive:
+        print('Choose the cluster distribution before loading its environment:', flush=True)
+        print('  1) OKD (community)\n  2) Red Hat OpenShift', flush=True)
+        choice = input('Selection [1]: ').strip().lower() or '1'
+        distribution = {'1': 'okd', 'okd': 'okd', '2': 'openshift', 'openshift': 'openshift'}.get(choice)
+        if distribution is None:
+            raise ConfigError('choose 1 (OKD) or 2 (Red Hat OpenShift)')
+        args += ['--distribution', distribution]
+    else:
+        return args
+    if distribution not in ('okd', 'openshift'):
+        raise ConfigError('--distribution must be okd or openshift')
+    candidates = []
+    for path in sorted((repo / 'clusters').glob('*.yaml')):
+        data = yaml.safe_load(path.read_text())
+        if isinstance(data, dict) and data.get('distribution', 'okd') == distribution:
+            if operation != 'destroy' or (repo / '.work' / path.stem / 'cluster.json').exists():
+                candidates.append(path.stem)
+    legacy = repo / '.env'
+    legacy_distribution = read_env(legacy).get('DEPLOYMENT_TYPE', 'okd') if legacy.exists() else 'okd'
+    # Keep the existing OKD legacy workspace as a routing option; OpenShift uses
+    # its own manifest whenever one is configured.
+    if distribution == 'okd' and legacy.exists() and legacy_distribution == 'okd':
+        candidates.insert(0, 'legacy')
+    if not candidates:
+        raise ConfigError(f'No {distribution} workspace configured. Copy clusters/{distribution if distribution == "openshift" else "dev"}.yaml.example to clusters/{distribution}.yaml and configure its domain, credentials and release.')
+    if len(candidates) == 1:
+        selected = candidates[0]
+    elif interactive:
+        print(f'Choose the {distribution} workspace:', flush=True)
+        for number, name in enumerate(candidates, 1):
+            print(f'  {number}) {name}', flush=True)
+        value = input('Workspace number: ').strip()
+        if not value.isdigit() or not 1 <= int(value) <= len(candidates):
+            raise ConfigError('invalid workspace selection')
+        selected = candidates[int(value) - 1]
+    else:
+        raise ConfigError('Multiple matching workspaces; specify --cluster NAME explicitly')
+    print(f'Selected {"Red Hat OpenShift" if distribution == "openshift" else "OKD"} · workspace {selected}', flush=True)
+    if selected != 'legacy':
+        args += ['--cluster', selected]
+    return args
+
+
+def choose_deploy_operation(repo, name, args):
+    """Choose a local restore set before workspace preparation or cloud access.
+
+    None means cancellation. Existing explicit lifecycle flags never prompt here.
+    The child keeps its existing typed restore confirmation and identity checks.
+    """
+    args = list(args)
+    interactive = sys.stdin.isatty() and '--yes' not in args
+    routing_only = not args or (len(args) == 2 and args[0] == '--distribution')
+    if routing_only and interactive:
+        print(f'Choose operation for workspace {name or "legacy"}:', flush=True)
+        print('  1) Deploy / continue installation\n  2) Restore a saved cluster snapshot\n  0) Cancel', flush=True)
+        choice = input('Operation [1]: ').strip() or '1'
+        if choice == '0':
+            print('Cancelled. No deployment or restore started.', flush=True)
+            return None
+        if choice not in ('1', '2'):
+            raise ConfigError('choose operation 1, 2 or 0')
+        if choice == '2':
+            args.append('--restore')
+    if '--restore' not in args:
+        return args
+    if not interactive:
+        raise ConfigError('--restore requires an interactive terminal; use --cluster NAME --restore-snapshot ID for an explicit restore')
+    # Reject incompatible flags before reading a selection or touching artifacts.
+    remaining, distribution = [], None
+    index = 0
+    while index < len(args):
+        flag = args[index]
+        if flag == '--restore':
+            if args.count(flag) != 1:
+                raise ConfigError('--restore may only be specified once')
+            index += 1
+        elif flag in ('--distribution', '--duration', '--autodestroy-at'):
+            if index + 1 >= len(args):
+                raise ConfigError(f'{flag} needs a value')
+            if flag == '--distribution':
+                if distribution is not None:
+                    raise ConfigError('--distribution may only be specified once')
+                distribution = args[index + 1]
+            else:
+                remaining += args[index:index + 2]
+            index += 2
+        elif flag in ('--no-autodestroy', '--snapshot-before-destroy', '--no-snapshot-before-destroy'):
+            remaining.append(flag)
+            index += 1
+        else:
+            raise ConfigError(f'--restore uses saved configuration; incompatible option: {flag}')
+    work = repo / '.work' / name if name else repo
+    if name:
+        config = load_config(repo, name)
+        domain, recorded_distribution = config['domain'], config.get('distribution', 'okd')
+    else:
+        if not (work / '.env').exists():
+            raise ConfigError('No legacy cluster environment; select a configured --cluster NAME')
+        config = read_env(work / '.env')
+        domain = config.get('TF_VAR_dns_domain')
+        recorded_distribution = config.get('DEPLOYMENT_TYPE', 'okd')
+    if distribution is not None and distribution != recorded_distribution:
+        raise ConfigError('--distribution must match the selected workspace')
+    candidates = []
+    other_domains = set()
+    store = work / '.cluster-snapshots'
+    if not store.is_symlink():
+        for path in sorted(store.glob('*/manifest.json')):
+            if path.is_symlink() or path.parent.is_symlink() or not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', path.parent.name):
+                continue
+            try:
+                manifest = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(manifest, dict):
+                continue
+            if (manifest.get('version'), manifest.get('cluster'), manifest.get('status')) == (1, name or '', 'ready') and manifest.get('domain') != domain:
+                other_domains.add(str(manifest.get('domain')))
+            if (manifest.get('version'), manifest.get('domain'), manifest.get('cluster'), manifest.get('status')) != (1, domain, name or '', 'ready'):
+                continue
+            if not isinstance(manifest.get('nodes'), list) or not manifest['nodes']:
+                continue
+            candidates.append((path.parent.name, len(manifest['nodes'])))
+    if not candidates:
+        detail = (' Saved snapshots belong to: ' + ', '.join(sorted(other_domains)) + '. Restore the original workspace configuration before proceeding.') if other_domains else ''
+        raise ConfigError(f'No completed local snapshots for {name or "legacy"} ({domain}); use --snapshot-list with the correct --cluster.' + detail)
+    print(f'Restore snapshots for {name or "legacy"} · {domain}:', flush=True)
+    for number, (snapshot, nodes) in enumerate(candidates, 1):
+        print(f'  {number}) {snapshot}  ready  {nodes} node(s)', flush=True)
+    print('  0) Cancel', flush=True)
+    selection = input('Snapshot number (0 cancels): ').strip()
+    if selection == '0':
+        print('Cancelled. No deployment or restore started.', flush=True)
+        return None
+    if not selection.isdigit() or not 1 <= int(selection) <= len(candidates):
+        raise ConfigError('invalid snapshot selection; no deployment or restore started')
+    snapshot = candidates[int(selection) - 1][0]
+    print(f'Selected restore: {snapshot} · {domain}. The restore command will request confirmation before provisioning.', flush=True)
+    return ['--restore-snapshot', snapshot, *remaining]
+
+
 def run(repo, operation, args):
+    args = route_distribution(repo, operation, args)
     if any(arg in ('--help', '-h') for arg in args):
         clean = list(args)
         if '--cluster' in clean:
@@ -298,12 +515,22 @@ def run(repo, operation, args):
             preview(repo, name)
         return 0
     with operation_lock(repo, name or 'legacy'):
+        if operation == 'deploy':
+            args = choose_deploy_operation(repo, name, args)
+            if args is None:
+                return 0
         env = dict(os.environ)
         if name:
             desired = load_config(repo, name)
-            for flag, key in (('--region', 'region'), ('--release', 'release')):
+            for flag, key in (('--release', 'release'), ('--distribution', 'distribution')):
                 if flag in args and (args.index(flag) + 1 == len(args) or args[args.index(flag) + 1] != desired[key]):
                     raise ConfigError(f'{flag} must match the pinned cluster YAML')
+            if '--region' in args:
+                index = args.index('--region')
+                if index + 1 == len(args):
+                    raise ConfigError('--region needs a value')
+                if (repo / '.work' / name / '.phases/configured').exists() and args[index + 1] != desired['region']:
+                    raise ConfigError('cannot change region of a configured cluster')
             work, data = prepare(repo, name, operation, '--resume' in args)
             for key in list(env):
                 if key.startswith('TF_VAR_') or key.startswith('TF_CLI_ARGS') or key in ('TF_WORKSPACE', 'TF_DATA_DIR', 'KUBECONFIG'):
@@ -321,13 +548,21 @@ def run(repo, operation, args):
                     '--ca-type', '--ca-min', '--ca-max', '--terraform-plan', '--resume',
                     '--restore-snapshot', '--snapshot-list', '--snapshot-cloud-list',
                     '--snapshot-import-template', '--snapshot-import-plan', '--snapshot-import'))
+                if not day_two:
+                    args = offer_resume(work, args)
+                    day_two = '--resume' in args
                 if '--scale' in args and '--masters' not in args and '--workers' not in args:
                     args += ['--masters', str(data['masters']), '--workers', str(data['workers'])]
                 if not day_two and not (work / '.phases/configured').exists():
+                    interactive_setup = sys.stdin.isatty() and '--yes' not in args
+                    env['HCLOUD_OKD4_INTERACTIVE_SETUP'] = '1' if interactive_setup else '0'
+                    env['HCLOUD_OKD4_SAVE_REGION'] = '1'
                     for flag, value in defaults.items():
+                        if interactive_setup and flag in ('--region', '--masters', '--workers', '--master-type', '--worker-type', '--duration'):
+                            continue
                         if flag not in args:
                             args += [flag, str(value)]
-                    if '--profile' not in args:
+                    if not interactive_setup and '--profile' not in args:
                         args += ['--profile', '4']
                 snapshot_management = any(flag in args for flag in (
                     '--snapshot-list', '--snapshot-cloud-list', '--snapshot-import-template',
@@ -376,6 +611,9 @@ def main():
             for key, value in read_env(sys.argv[2]).items():
                 print(f'export {key}={shlex.quote(value)}')
             return 0
+        if sys.argv[1] == 'save-region':
+            save_region_selection(sys.argv[2], sys.argv[3])
+            return 0
         if sys.argv[1] == 'set-env':
             values = read_env(sys.argv[2])
             values[sys.argv[3]] = sys.argv[4]
@@ -384,6 +622,9 @@ def main():
         if sys.argv[1] == 'run':
             return run(Path(sys.argv[2]).resolve(), sys.argv[3], sys.argv[4:])
         raise ConfigError('unknown command')
+    except (KeyboardInterrupt, EOFError):
+        print('\nCancelled.', file=sys.stderr)
+        return 130
     except (ConfigError, OSError, ValueError, yaml.YAMLError) as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 1

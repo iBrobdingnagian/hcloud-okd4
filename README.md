@@ -73,7 +73,21 @@ IPs; it does not start a restore or change any cloud resource.
 # Find a completed snapshot set, then restore this same cluster.
 ./deploy-okd.sh --cluster dev --snapshot-list
 ./deploy-okd.sh --cluster dev --restore-snapshot SNAPSHOT_ID --no-autodestroy --yes
+
+# Interactive restore: choose distribution/workspace, then a completed snapshot.
+./deploy-okd.sh --restore
+# Or target the Red Hat workspace directly:
+./deploy-okd.sh --cluster openshift --restore
 ```
+
+Interactive startup (`./deploy-okd.sh`, or `--cluster NAME` without another
+operation) offers **Deploy / continue installation**, **Restore a saved cluster
+snapshot**, or **Cancel**. Restore lists only ready local snapshot sets matching
+the selected workspace and domain. Selection does not start a fresh installation;
+the existing typed `restore` confirmation is still required before provisioning.
+Cancel, invalid selection, or no matching snapshots never falls back to deployment.
+`--restore` requires a terminal; unattended restores must use an explicit
+`--restore-snapshot ID` instead.
 
 Omit `--cluster dev` for the legacy repository workspace. The deploy flag saves
 the preference in that workspace; `--no-snapshot-before-destroy` disables it.
@@ -675,3 +689,36 @@ python3 scripts/hetzner_billing_report.py
 This regenerates the report from the snapshot; it does not fetch new usage.
 Options: `--input PATH`, `--output PATH`. No resource cost estimates are used.
 Generated reports are private and ignored by Git.
+
+
+## OKD and Red Hat OpenShift lifecycle
+
+The deployment scripts support both distributions on `master_redhat`. Run
+`./deploy-okd.sh` interactively to select OKD or Red Hat OpenShift, then a
+workspace and deploy/restore operation. Fresh installations use the shared
+profile → region → live availability/pricing → duration → confirmation flow.
+Production/Lab profiles retain automatic server selection; Manual offers pickers.
+
+For Red Hat, copy `clusters/openshift.yaml.example` to `clusters/openshift.yaml`,
+configure a unique domain and network ranges, set an exact release, and supply
+private credentials, SSH keys and a Red Hat pull-secret JSON. Named workspaces
+use `.work/NAME/`; explicit `--cluster NAME` bypasses distribution selection.
+
+```bash
+./deploy-okd.sh --cluster openshift --no-autodestroy
+./deploy-okd.sh --cluster openshift --resume --no-autodestroy
+./destroy-okd.sh --cluster openshift
+./deploy-okd.sh --cluster openshift --restore
+```
+
+Destroy offers snapshot-before-teardown, teardown without a new snapshot,
+read-only snapshot listings, and Cancel. Existing snapshots are retained.
+Same-IP restore requires original node Primary IPs, disk images and saved
+installation artifacts. Local `ready` status alone does not guarantee those
+cloud dependencies still exist. Retained resources remain billable.
+
+See the [multi-cluster lifecycle runbook](readme/MULTI_CLUSTER_LIFECYCLE.md) for
+setup, cluster rotation, release selection, automation, examples and Jira work
+tracking. See [snapshot recovery](readme/CLUSTER_RESTORE.md) for detailed recovery
+checks and limitations. Automatic unused cluster-number allocation is planned
+in OPS-164 and is not implemented.

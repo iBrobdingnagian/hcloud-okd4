@@ -48,6 +48,15 @@ class ClusterTests(unittest.TestCase):
         self.config('dev', 10)
         self.config('staging', 20)
 
+    def test_context_check_explains_missing_installer_credentials(self):
+        result = self.bash(f'source "{ROOT}/functions/lifecycle.sh"; DOMAIN=dev.example.com; '
+                           'KUBECONFIG="$PWD/missing"; oc(){ echo unexpected-oc >&2; return 99; }; '
+                           'assert_cluster_context')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing installer kubeconfig', result.stderr)
+        self.assertIn('--cluster openshift', result.stderr)
+        self.assertNotIn('unexpected-oc', result.stderr)
+
     def config(self, name, subnet):
         data = yaml.safe_load((ROOT / 'clusters/dev.yaml.example').read_text())
         data.update(name=name, domain=f'{name}.example.com', credentials_file=f'.secrets/{name}.env',
@@ -119,6 +128,163 @@ class ClusterTests(unittest.TestCase):
         context.write_env(work / '.env', env)
         with self.assertRaisesRegex(context.ConfigError, 'differs from cluster identity'):
             context.prepare(self.repo, 'dev', 'destroy')
+
+    def test_fresh_interactive_workspace_prompts_for_region_and_live_types(self):
+        child = self.repo / 'deploy-okd.sh'
+        child.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$HCLOUD_OKD4_CONTEXT_DIR/received-args"\n')
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='1'):
+            self.assertEqual(context.run(self.repo, 'deploy', ['--cluster', 'dev']), 0)
+        args = (self.repo / '.work/dev/received-args').read_text().splitlines()
+        for flag in ('--region', '--master-type', '--worker-type', '--masters', '--workers', '--profile', '--duration'):
+            self.assertNotIn(flag, args)
+        self.assertIn('--release', args)
+
+    def saved_snapshot(self, name='dev', snapshot='saved-set', status='ready', domain=None, cluster=None):
+        directory = self.repo / '.work' / name / '.cluster-snapshots' / snapshot
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'manifest.json').write_text(json.dumps(dict(version=1, status=status,
+            domain=domain or f'{name}.example.com', cluster=name if cluster is None else cluster,
+            nodes=[{'name': 'master01'}])))
+        return directory
+
+    def test_restore_picker_routes_only_completed_snapshots_for_selected_cluster(self):
+        self.saved_snapshot(snapshot='a-good')
+        self.saved_snapshot(snapshot='b-incomplete', status='incomplete')
+        self.saved_snapshot(snapshot='c-foreign-domain', domain='other.example.com')
+        self.saved_snapshot(snapshot='d-foreign-cluster', cluster='other')
+        self.saved_snapshot(name='staging', snapshot='another-workspace')
+        output = io.StringIO()
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='1'), contextlib.redirect_stdout(output):
+            args = context.choose_deploy_operation(self.repo, 'dev', ['--restore', '--no-autodestroy'])
+        self.assertEqual(args, ['--restore-snapshot', 'a-good', '--no-autodestroy'])
+        for excluded in ('b-incomplete', 'c-foreign-domain', 'd-foreign-cluster', 'another-workspace'):
+            self.assertNotIn(excluded, output.getvalue())
+
+    def test_startup_restore_option_removes_routing_flag_and_uses_saved_configuration(self):
+        self.saved_snapshot()
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=['2', '1']):
+            args = context.choose_deploy_operation(self.repo, 'dev', ['--distribution', 'okd'])
+        self.assertEqual(args, ['--restore-snapshot', 'saved-set'])
+
+    def test_restore_selection_cancel_never_prepares_or_runs_deployment(self):
+        self.saved_snapshot()
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='0'), patch.object(context, 'prepare') as prepare, patch.object(context.subprocess, 'Popen') as spawn:
+            self.assertEqual(context.run(self.repo, 'deploy', ['--cluster', 'dev', '--restore']), 0)
+        prepare.assert_not_called()
+        spawn.assert_not_called()
+
+    def test_startup_cancel_never_prepares_or_runs_deployment(self):
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='0'), patch.object(context, 'prepare') as prepare, patch.object(context.subprocess, 'Popen') as spawn:
+            self.assertEqual(context.run(self.repo, 'deploy', ['--cluster', 'dev']), 0)
+        prepare.assert_not_called()
+        spawn.assert_not_called()
+
+    def test_restore_picker_requires_interactive_selection_not_yes_defaults(self):
+        with patch.object(context.sys.stdin, 'isatty', return_value=False):
+            with self.assertRaisesRegex(context.ConfigError, 'interactive terminal'):
+                context.choose_deploy_operation(self.repo, 'dev', ['--restore'])
+        with patch.object(context.sys.stdin, 'isatty', return_value=True):
+            with self.assertRaisesRegex(context.ConfigError, 'interactive terminal'):
+                context.choose_deploy_operation(self.repo, 'dev', ['--restore', '--yes'])
+
+    def test_restore_picker_rejects_missing_or_invalid_selection_without_fallback(self):
+        with patch.object(context.sys.stdin, 'isatty', return_value=True):
+            with self.assertRaisesRegex(context.ConfigError, 'No completed local snapshots'):
+                context.choose_deploy_operation(self.repo, 'dev', ['--restore'])
+        self.saved_snapshot()
+        for selection in ('', '2', '-1', 'deploy'):
+            with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value=selection):
+                with self.assertRaisesRegex(context.ConfigError, 'invalid snapshot selection'):
+                    context.choose_deploy_operation(self.repo, 'dev', ['--restore'])
+
+    def test_restore_picker_rejects_configuration_overrides_and_wrong_distribution(self):
+        with patch.object(context.sys.stdin, 'isatty', return_value=True):
+            for args in (['--restore', '--workers', '5'], ['--restore', '--distribution', 'openshift']):
+                with self.assertRaises(context.ConfigError):
+                    context.choose_deploy_operation(self.repo, 'dev', args)
+
+    def test_explicit_restore_and_other_lifecycle_commands_do_not_open_menu(self):
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', side_effect=AssertionError('unexpected menu')):
+            for args in (['--restore-snapshot', 'saved-set'], ['--snapshot-list'], ['--resume'], ['--scale'], ['--yes']):
+                self.assertEqual(context.choose_deploy_operation(self.repo, 'dev', args), args)
+
+    def test_restore_picker_child_receives_restore_not_install_arguments(self):
+        self.saved_snapshot()
+        child = self.repo / 'deploy-okd.sh'
+        child.write_text('#!/bin/bash\nprintf "%s\\n" "$@" > "$HCLOUD_OKD4_CONTEXT_DIR/received-args"\n')
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='1'):
+            self.assertEqual(context.run(self.repo, 'deploy', ['--cluster', 'dev', '--restore']), 0)
+        args = (self.repo / '.work/dev/received-args').read_text().splitlines()
+        self.assertEqual(args[:2], ['--restore-snapshot', 'saved-set'])
+        for flag in ('--release', '--region', '--profile', '--masters', '--workers'):
+            self.assertNotIn(flag, args)
+
+    def test_openshift_uses_same_automatic_profile_and_price_selection(self):
+        result = self.bash("""
+source "$REPO_ROOT/functions/profiles.sh"
+source "$REPO_ROOT/functions/server-types.sh"
+log(){ :; }
+err(){ echo "$*" >&2; exit 1; }
+DEPLOYMENT_TYPE=openshift FLAG_PROFILE=2 ASSUME_YES=0
+FLAG_MASTERS= FLAG_WORKERS= FLAG_MASTER_TYPE= FLAG_WORKER_TYPE=
+select_profile
+LOC=nbg1
+CANDIDATES=$'cpx42\\t8\\t16\\t320\\t0.11\\nccx33\\t8\\t32\\t240\\t0.20'
+pick_type master "$MIN_C_MASTER" "$MIN_R_MASTER" "" "$TYPE_PREFIX" "$TYPE_STRATEGY"
+test "$PROFILE:$MASTERS:$WORKERS:$PICKED_TYPE:$PICKED_PRICE" = '2:3:3:cpx42:0.11'
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_interactive_incomplete_workspace_offers_resume(self):
+        work, _ = context.prepare(self.repo, 'dev', 'deploy')
+        (work / '.phases').mkdir()
+        (work / '.phases/configured').touch()
+        original = (work / '.env').read_bytes()
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value=''):
+            self.assertEqual(context.offer_resume(work, ['--no-autodestroy']), ['--no-autodestroy', '--resume'])
+        self.assertEqual((work / '.env').read_bytes(), original)
+        with patch.object(context.sys.stdin, 'isatty', return_value=True), patch('builtins.input', return_value='n'):
+            with self.assertRaisesRegex(context.ConfigError, 'cancelled'):
+                context.offer_resume(work, [])
+
+    def test_missing_ignition_cannot_resume_from_startup_menu(self):
+        work, _ = context.prepare(self.repo, 'dev', 'deploy')
+        (work / '.phases').mkdir()
+        (work / '.phases/configured').touch()
+        (work / '.phases/ignition').touch()
+        with self.assertRaisesRegex(context.ConfigError, 'artifacts are missing'):
+            context.offer_resume(work, [])
+
+    def test_selected_region_persists_for_resume_and_destroy(self):
+        work, _ = context.prepare(self.repo, 'dev', 'deploy')
+        values = context.read_env(work / '.env')
+        values.update(TF_VAR_location='hel1', TF_VAR_network_zone='eu-central')
+        context.write_env(work / '.env', values)
+        config = self.repo / 'clusters/dev.yaml'
+        context.save_region_selection(config, work)
+        self.assertEqual(context.load_config(self.repo, 'dev')['region'], 'hel1')
+        context.prepare(self.repo, 'dev', 'destroy')
+        (work / '.phases').mkdir()
+        (work / '.phases/configured').touch()
+        context.prepare(self.repo, 'dev', 'deploy', resume=True)
+        with self.assertRaises(context.ConfigError):
+            context.save_region_selection(config, work)
+
+    def test_host_api_uses_owned_lb_with_tls_hostname_and_preserves_config_views(self):
+        state = {'resources': [{'type': 'hcloud_load_balancer', 'mode': 'managed', 'instances': [
+            {'attributes': {'name': 'lb.dev.example.com', 'ipv4': '192.0.2.10'}}]}]}
+        (self.repo / 'terraform/terraform.tfstate').write_text(json.dumps(state))
+        bindir = self.repo / 'bin';bindir.mkdir()
+        oc = bindir / 'oc';oc.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$PWD/oc-args"\n');oc.chmod(0o700)
+        result = self.bash('source "$REPO_ROOT/functions/lifecycle.sh"; '
+                           'DOMAIN=dev.example.com; PATH="$PWD/bin:$PATH"; '
+                           'configure_host_api; oc get nodes; oc config view --minify')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (self.repo / 'oc-args').read_text().splitlines()
+        self.assertIn('--server=https://192.0.2.10:6443', calls[0])
+        self.assertIn('--tls-server-name=api.dev.example.com', calls[0])
+        self.assertNotIn('insecure', calls[0])
+        self.assertEqual(calls[1], 'config view --minify')
 
     def test_worker_only_scale_does_not_supply_master_override(self):
         child = self.repo / 'deploy-okd.sh'
@@ -239,6 +405,8 @@ stop_cluster_autoscaler_before_destroy
         self.assertIn('Forbidden', result.stderr)
 
     def test_failed_drain_prevents_terraform_and_node_deletion(self):
+        (self.repo / 'ignition/auth').mkdir(parents=True)
+        (self.repo / 'ignition/auth/kubeconfig').write_text('# fixture: oc is mocked below\n')
         (self.repo / '.env').write_text('TF_VAR_replicas_worker=2\n')
         result = self.bash('''
 . "$REPO_ROOT/functions/lifecycle.sh"

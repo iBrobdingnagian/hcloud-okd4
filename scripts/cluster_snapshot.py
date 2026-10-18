@@ -176,7 +176,7 @@ def create(work, cloud):
     bundle_files(work, directory / 'artifacts')
     shutil.copy2(work / 'terraform/terraform.tfstate', directory / 'terraform-state-before-delete.json')
     (directory / 'terraform-state-before-delete.json').chmod(0o600)
-    config = {k: v for k, v in env.items() if k.startswith('TF_VAR_') or k == 'OPENSHIFT_RELEASE'}
+    config = {k: v for k, v in env.items() if k.startswith('TF_VAR_') or k in ('OPENSHIFT_RELEASE', 'DEPLOYMENT_TYPE')}
     manifest = {'version': 1, 'id': name, 'domain': domain, 'cluster': cluster,
                 'status': 'creating', 'created': datetime.now(timezone.utc).isoformat(),
                 'config': config, 'nodes': []}
@@ -198,7 +198,7 @@ def create(work, cloud):
         for node in nodes:
             print('Snapshotting ' + node['name'], file=sys.stderr, flush=True)
             response = cloud.request(f'servers/{node["id"]}/actions/create_image', {
-                'type': 'snapshot', 'description': f'OKD {name} {node["name"]}',
+                'type': 'snapshot', 'description': f'{"RH OpenShift" if env.get("DEPLOYMENT_TYPE", "okd") == "openshift" else "OKD"} {name} {node["name"]}',
                 'labels': {'hcloud-okd4/snapshot': name,
                            'hcloud-okd4/node': node['name'].split('.')[0]}})
             image_id = response['image']['id']
@@ -244,7 +244,7 @@ def read_manifest(work, name):
     if (data.get('version'), data.get('domain'), data.get('cluster'), data.get('status')) != (1, domain, cluster, 'ready'):
         raise SnapshotError('Snapshot is incomplete or belongs to a different cluster')
     if data['config'].get('OPENSHIFT_RELEASE') != env.get('OPENSHIFT_RELEASE'):
-        raise SnapshotError('Restore must use the original OKD release')
+        raise SnapshotError('Restore must use the original deployment release')
     for key in ('TF_VAR_dns_domain', 'TF_VAR_dns_zone_id', 'TF_VAR_cluster_id',
                 'TF_VAR_location', 'TF_VAR_network_zone', 'TF_VAR_network_cidr',
                 'TF_VAR_subnet_cidr', 'TF_VAR_lb_subnet_cidr'):
@@ -365,7 +365,7 @@ def review_import(work, spec_path, cloud):
                 'status': 'ready', 'origin': 'import',
                 'created': datetime.now(timezone.utc).isoformat(),
                 'consistency': 'operator-confirmed cold snapshot set and matching artifacts',
-                'config': {k: v for k, v in config.items() if k.startswith('TF_VAR_') or k == 'OPENSHIFT_RELEASE'},
+                'config': {k: v for k, v in config.items() if k.startswith('TF_VAR_') or k in ('OPENSHIFT_RELEASE', 'DEPLOYMENT_TYPE')},
                 'nodes': []}
     seen_images, seen_ips = set(), set()
     for entry in entries:
@@ -450,12 +450,23 @@ def prepare_restore(work, name, cloud):
         image = cloud.request(f'images/{int(node["image"])}')['image']
         verify_image(node, image, manifest)
         for family in ('ipv4', 'ipv6'):
-            ip = cloud.request(f'primary_ips/{int(node[family])}')['primary_ip']
+            try:
+                ip = cloud.request(f'primary_ips/{int(node[family])}')['primary_ip']
+            except SnapshotError as exc:
+                if isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 404:
+                    raise SnapshotError(
+                        f'Restore blocked: original {family} Primary IP {node[family]} '
+                        f'({node[family + "_address"]}) for {node["name"]} no longer exists in this project. '
+                        'The disk snapshot alone is insufficient for this same-IP restore. '
+                        'Do not replace the saved IP IDs with different addresses. '
+                        'Check the original Hetzner project/token and whether the retained IPs were deleted; '
+                        'no restore resources have been provisioned.') from exc
+                raise
             if ip.get('assignee_id') != assigned.get(node['name']) or ip.get('auto_delete') or ipaddress.ip_network(ip['ip'], strict=False) != ipaddress.ip_network(node[family + '_address'], strict=False):
                 raise SnapshotError('Retained Primary IP is assigned, unprotected, or changed')
     # Preserve current credentials, but restore the original deployment settings.
     for key, value in manifest['config'].items():
-        if key.startswith('TF_VAR_') or key == 'OPENSHIFT_RELEASE':
+        if key.startswith('TF_VAR_') or key in ('OPENSHIFT_RELEASE', 'DEPLOYMENT_TYPE'):
             env[key] = value
     for role in ('master', 'worker'):
         role_nodes = sorted((n for n in nodes if n['name'].startswith(role)), key=lambda n: n['name'])

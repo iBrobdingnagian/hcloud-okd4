@@ -7,6 +7,7 @@ import sys
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,6 +117,8 @@ class SnapshotTests(unittest.TestCase):
         manifest = self.work / snapshots.STORE / name / 'manifest.json'
         data = json.loads(manifest.read_text())
         self.assertEqual(data['status'], 'ready')
+        descriptions = [payload['description'] for path, payload, _ in self.cloud.calls if path.endswith('/create_image')]
+        self.assertTrue(all(description.startswith('OKD ') for description in descriptions))
         self.assertEqual(len(data['nodes']), 2)
         self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
         self.assertNotIn('HCLOUD_TOKEN', data['config'])
@@ -138,6 +141,14 @@ class SnapshotTests(unittest.TestCase):
         variables = json.loads((self.work / snapshots.RESTORE_VARS).read_text())
         self.assertEqual(variables['restore_nodes'][f'master01.{self.domain}'],
                          {'image': 101, 'ipv4': 10, 'ipv6': 11})
+
+    def test_snapshot_description_matches_distribution(self):
+        self.env['DEPLOYMENT_TYPE'] = 'openshift'
+        write_env(self.work / '.env', self.env)
+        self.create()
+        descriptions = [data['description'] for path, data, _ in self.cloud.calls if path.endswith('/create_image')]
+        self.assertTrue(descriptions)
+        self.assertTrue(all(description.startswith('RH OpenShift ') for description in descriptions))
 
     def test_failed_snapshot_never_produces_restorable_manifest_or_deletes_servers(self):
         self.cloud.fail_image = True
@@ -180,6 +191,20 @@ class SnapshotTests(unittest.TestCase):
             snapshots.read_manifest(self.work, '../escape')
         with patch.dict(os.environ, {'CLUSTER_ID': 'another'}), self.assertRaises(snapshots.SnapshotError):
             snapshots.read_manifest(self.work, name)
+
+    def test_deleted_primary_ip_explains_why_restore_is_blocked(self):
+        name = self.create()
+        self.deleted()
+        original = self.cloud.request
+        def missing_ip(path, data=None, method=None):
+            if path.startswith('primary_ips/'):
+                cause = urllib.error.HTTPError('https://api.hetzner.cloud/v1/' + path, 404, 'Not Found', {}, None)
+                raise snapshots.SnapshotError('HTTP 404') from cause
+            return original(path, data, method)
+        self.cloud.request = missing_ip
+        with self.assertRaisesRegex(snapshots.SnapshotError, 'original ipv4 Primary IP'):
+            snapshots.prepare_restore(self.work, name, self.cloud)
+        self.assertFalse((self.work / snapshots.RESTORE_VARS).exists())
 
     def test_retry_is_scoped_to_exact_incomplete_restore(self):
         name = self.create()

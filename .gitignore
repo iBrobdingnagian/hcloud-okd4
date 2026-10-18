@@ -50,3 +50,9 @@ deploy-start.txt
 
 # Generated private billing report
 /report/
+
+# Downloaded Red Hat installer checksums
+openshift-sha256sum-*.txt
+
+# Local site-specific OpenShift configuration (use the committed example)
+/clusters/openshift.yaml

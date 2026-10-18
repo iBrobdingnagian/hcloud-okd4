@@ -20,6 +20,9 @@ done
 usage() {
   cat <<'USAGE'
 Usage: ./deploy-okd.sh [options]
+  With no workspace/distribution flag, first choose OKD or Red Hat OpenShift.
+  The chosen distribution selects its configured workspace and environment.
+  Interactive startup offers deployment or restoration from saved snapshots.
   --cluster NAME    use clusters/NAME.yaml and isolated .work/NAME/ artifacts
   --plan            preview named-cluster configuration and live compute pricing
                     (combine only with --cluster; creates no cloud resources)
@@ -36,6 +39,8 @@ Usage: ./deploy-okd.sh [options]
                     needs original state, configuration, artifacts and retained IPs
   --restore-snapshot ID  recreate this same cluster from a completed snapshot set;
                     keeps original node IPs and credentials; no fresh installation
+  --restore         interactively choose a completed snapshot for this workspace;
+                    choose OKD/OpenShift first, or supply --cluster NAME
   --region X        Hetzner location (e.g. nbg1, fsn1, hel1, ash, hil, sin)
   --profile N       deployment profile (skips the interactive menu):
                       1 = Production - Best Servers (3 masters / 3 workers,
@@ -51,6 +56,8 @@ Usage: ./deploy-okd.sh [options]
   --master-type T   server type for masters (e.g. cpx42)
   --worker-type T   server type for workers
   --duration D      lab duration: hours (8) or minutes (90m)
+  --distribution D  okd (default) or openshift (Red Hat, pinned release required)
+  --pull-secret-file FILE  Red Hat pull-secret JSON for a fresh OpenShift install
   --release R       OKD line (4.16) or full tag (4.16.0-okd-scos.1)
   --rebuild-image   build the CoreOS snapshot even if one exists for this release
   --no-admin        skip the htpasswd admin step
@@ -139,6 +146,7 @@ Usage: ./deploy-okd.sh [options]
 USAGE
 }
 FLAG_REGION="" FLAG_MASTERS="" FLAG_WORKERS="" FLAG_MASTER_TYPE="" FLAG_WORKER_TYPE=""
+FLAG_DISTRIBUTION="" FLAG_PULL_SECRET=""
 FLAG_DURATION="" FLAG_RELEASE="" REBUILD_IMAGE=0 NO_ADMIN=0 NO_AUTODESTROY=0 ASSUME_YES=0
 FLAG_PROFILE="" FLAG_LAB_TOPOLOGY="" FLAG_LAB_TIER="" FLAG_AUTODESTROY_AT="" FLAG_SCALE=0
 FLAG_MONITORING=0 ALERT_WEBHOOK="" FLAG_ADMIN=0
@@ -178,6 +186,8 @@ while [ $# -gt 0 ]; do
     --worker-type)    FLAG_WORKER_TYPE=${2:?--worker-type needs a value}; shift 2 ;;
     --duration)       FLAG_DURATION=${2:?--duration needs a value}; shift 2 ;;
     --autodestroy-at) FLAG_AUTODESTROY_AT=${2:?--autodestroy-at needs a value}; shift 2 ;;
+    --distribution) FLAG_DISTRIBUTION=${2:?--distribution needs okd or openshift}; shift 2 ;;
+    --pull-secret-file) FLAG_PULL_SECRET=${2:?--pull-secret-file needs a file}; shift 2 ;;
     --release)        FLAG_RELEASE=${2:?--release needs a value}; shift 2 ;;
     --rebuild-image)  REBUILD_IMAGE=1; shift ;;
     --no-admin)       NO_ADMIN=1; shift ;;
@@ -250,7 +260,9 @@ fi
 start_progress_server   # functions/progress.sh
 load_env
 DOMAIN=${TF_VAR_dns_domain:?TF_VAR_dns_domain is required}
+configure_distribution
 export KUBECONFIG="$PWD/ignition/auth/kubeconfig"
+configure_host_api
 if [ "$FLAG_SNAPSHOT_BEFORE_DESTROY" = 1 ]; then
   (umask 077; : > .snapshot-before-destroy)
 fi
@@ -306,6 +318,9 @@ if [ "$FLAG_RESUME" = 0 ] && [ "${EXISTING_SERVERS:-0}" -gt 0 ] 2>/dev/null; the
 fi
 
 if [ "$FLAG_RESUME" = 0 ]; then
+  if phase_done configured || phase_done ignition; then
+    err "this workspace has deployment checkpoints; do not start a fresh install over them. Use --resume only with the original artifacts. For your separate Red Hat cluster, run ./deploy-okd.sh --cluster openshift --no-autodestroy"
+  fi
   [ ! -d ignition ] && [ ! -d config ] \
     || err "installation artifacts already exist; use --resume or archive them explicitly after teardown"
 
@@ -363,7 +378,7 @@ fi
 BOOTSTRAP_TYPE=$MASTER_TYPE BOOTSTRAP_PRICE=$MASTER_PRICE
 IGNITION_TYPE=$(echo "$CANDIDATES" | head -1 | cut -f1)
 IGNITION_PRICE=$(echo "$CANDIDATES" | head -1 | cut -f5)
-if [ -n "${CLUSTER_ID:-}" ]; then
+if [ -n "${CLUSTER_ID:-}" ] && [ "${HCLOUD_OKD4_INTERACTIVE_SETUP:-0}" != 1 ]; then
   IGNITION_TYPE=$TF_VAR_server_type_ignition
   IGNITION_PRICE=$(echo "$CANDIDATES" | awk -F'\t' -v t="$IGNITION_TYPE" '$1 == t {print $5}')
   [ -n "$IGNITION_PRICE" ] || err "configured ignition type $IGNITION_TYPE is unavailable in $LOC"
@@ -419,6 +434,7 @@ fi
 
 # ── 4. version (functions/release.sh) ─────────────────────────────────────
 select_release
+python3 "$REPO_ROOT/scripts/cluster_context.py" set-env .env DEPLOYMENT_TYPE "$DEPLOYMENT_TYPE"
 
 # ── 5. write the choices into .env / install-config.yaml ────────────────
 step "Updating .env and install-config.yaml" "instant"
@@ -464,6 +480,9 @@ EOF
 
 load_env
 python3 "$REPO_ROOT/scripts/cluster_context.py" set-env .env LAB_DURATION "$DUR"
+if [ "${HCLOUD_OKD4_SAVE_REGION:-0}" = 1 ]; then
+  python3 "$REPO_ROOT/scripts/cluster_context.py" save-region "$CLUSTER_CONFIG" "$PWD"
+fi
 phase_mark configured
 else
   MASTERS=$TF_VAR_replicas_master WORKERS=$TF_VAR_replicas_worker
@@ -482,7 +501,7 @@ if docker image inspect "$TOOLBOX" >/dev/null 2>&1; then
   echo "    $TOOLBOX already present — skipping fetch/build"
 else
   log "Fetching installer tarballs (~700 MB) and building toolbox image"
-  make fetch
+  make fetch DEPLOYMENT_TYPE="$DEPLOYMENT_TYPE"
   make build
 fi
 
@@ -505,8 +524,8 @@ fi
 # ── 8. CoreOS snapshot (reused when one exists for this release) ─────────
 step "CoreOS image" "skipped if a snapshot for this release exists, else 2-5 min"
 FCOS_RELEASE=$(tb "openshift-install coreos print-stream-json \
-  | jq -r '.architectures.x86_64.artifacts.qemu.release'" | tr -d '[:space:]')
-[ -n "$FCOS_RELEASE" ] || err "could not determine the CoreOS release from the toolbox"
+  | jq -r '(.architectures.x86_64.artifacts.qemu // .architectures.x86_64.artifacts.openstack).release'" | tr -d '[:space:]')
+[ -n "$FCOS_RELEASE" ] && [ "$FCOS_RELEASE" != null ] || err "could not determine the CoreOS release from the toolbox"
 sedi -E -e "s|^TF_VAR_fcos_release=.*|TF_VAR_fcos_release=$FCOS_RELEASE|" .env
 grep -q '^TF_VAR_fcos_release=' .env \
   || echo "TF_VAR_fcos_release=$FCOS_RELEASE" >> .env
@@ -550,6 +569,7 @@ fi
 
 # ── install watchdog (functions/watchdog.sh) runs during the wait ────────
 export KUBECONFIG=$PWD/ignition/auth/kubeconfig
+configure_host_api
 install_watchdog &
 WATCHDOG=$!
 trap 'deployment_status=$?; trap - EXIT; if [ -n "${WATCHDOG:-}" ]; then kill "$WATCHDOG" 2>/dev/null || true; fi; if [ -n "${RELDIR:-}" ]; then rm -rf "$RELDIR" || true; fi; exit "$deployment_status"' EXIT
@@ -558,6 +578,8 @@ step "Waiting for install completion" "5-25 min"
 tb "make wait_completion" || { log "Watcher timed out — retrying once"; tb "make wait_completion"; }
 phase_mark installed
 kill "$WATCHDOG" 2>/dev/null || true
+wait "$WATCHDOG" 2>/dev/null || true
+WATCHDOG=""
 
 # ── 11. join the workers (CSR rounds until everyone is Ready) ─────────────
 export KUBECONFIG=$PWD/ignition/auth/kubeconfig
@@ -566,7 +588,11 @@ step "Approving CSRs until all $EXPECTED nodes are Ready" "2-10 min"
 tries=0
 while [ $tries -lt 60 ]; do
   oc get csr -o name 2>/dev/null | xargs -r oc adm certificate approve 2>/dev/null || true
-  READY=$(oc get nodes --no-headers 2>/dev/null | awk '$2=="Ready"' | wc -l | tr -d ' ')
+  if ! NODE_ROWS=$(oc get nodes --no-headers); then
+    echo "    API query failed; retrying node readiness check" >&2
+    tries=$((tries+1)); sleep 20; continue
+  fi
+  READY=$(echo "$NODE_ROWS" | awk '$2=="Ready"' | wc -l | tr -d ' ')
   [ "$READY" -ge "$EXPECTED" ] && break
   tries=$((tries+1)); sleep 20
 done
@@ -647,7 +673,7 @@ fi
 cat <<SUMMARY
 
 ═══════════════════════════════════════════════════════════════════
-  OKD $OPENSHIFT_RELEASE deployed: $MASTERS master(s), $WORKERS worker(s)
+  ${DEPLOYMENT_TYPE:-okd} $OPENSHIFT_RELEASE deployed: $MASTERS master(s), $WORKERS worker(s)
   Total time: $(elapsed)
 ═══════════════════════════════════════════════════════════════════
 

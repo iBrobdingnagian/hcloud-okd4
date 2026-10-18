@@ -18,6 +18,31 @@ validate_ignition() {
   python3 "$REPO_ROOT/scripts/validate_ignition.py" ignition/*.ign
 }
 
+# Host DNS can retain NXDOMAIN while toolbox DNS already resolves the API.
+# Keep original credentials and certificate verification, using only our managed LB.
+configure_host_api() {
+  [ -s terraform/terraform.tfstate ] || return 0
+  HOST_API_IP=$(python3 - "$DOMAIN" <<'HOST_API'
+import ipaddress, json, sys
+from pathlib import Path
+state = json.loads(Path('terraform/terraform.tfstate').read_text())
+ips = [i['attributes']['ipv4'] for r in state.get('resources', [])
+       if r.get('type') == 'hcloud_load_balancer' and r.get('mode', 'managed') == 'managed'
+       for i in r.get('instances', []) if i.get('attributes', {}).get('name') == 'lb.' + sys.argv[1]]
+if len(ips) == 1:
+    print(ipaddress.IPv4Address(ips[0]))
+HOST_API
+  ) || return 1
+  [ -n "$HOST_API_IP" ] || return 0
+  oc() {
+    if [ "${1:-}" = config ]; then
+      command oc "$@"
+    else
+      command oc --request-timeout=30s "--server=https://$HOST_API_IP:6443" "--tls-server-name=api.$DOMAIN" "$@"
+    fi
+  }
+}
+
 verify_cluster_health() {
   oc get --raw=/readyz >/dev/null || err "cluster API is not ready"
   oc get clusteroperators -o json | jq -e '
@@ -113,6 +138,13 @@ validate_deploy_flags() {
 }
 
 assert_cluster_context() {
+  local kubeconfig=${KUBECONFIG:-$PWD/ignition/auth/kubeconfig}
+  if [ ! -s "$kubeconfig" ]; then
+    echo "Missing installer kubeconfig: $kubeconfig" >&2
+    echo "Existing servers for $DOMAIN cannot be managed from this checkout without their original kubeconfig and Terraform state." >&2
+    echo "Recover the original workspace/artifacts to manage them. For a separate OpenShift cluster, configure clusters/openshift.yaml and run ./deploy-okd.sh --cluster openshift." >&2
+    return 1
+  fi
   local server
   server=$(oc config view --minify -o jsonpath='{.clusters[0].cluster.server}') || return 1
   [ "$server" = "https://api.$DOMAIN:6443" ] \

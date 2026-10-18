@@ -3,6 +3,28 @@
 # Sourced by deploy-okd.sh; not meant to be executed directly.
 
 select_release() {
+if [ "${DEPLOYMENT_TYPE:-okd}" = openshift ]; then
+  OPENSHIFT_RELEASE=${FLAG_RELEASE:-}
+  if [ -z "$OPENSHIFT_RELEASE" ]; then
+    [ "${ASSUME_YES:-0}" != 1 ] || err "OpenShift --yes requires an exact --release"
+    local choices selection
+    choices=$(python3 "$REPO_ROOT/scripts/openshift_versions.py") || err "could not list Red Hat releases; use --release"
+    log "Choose a Red Hat OpenShift release (newest mirrored patch per line):"
+    echo "    Mirror availability does not establish Red Hat lifecycle support."
+    echo "$choices" | awk '{printf "  %d) %s\n", NR, $0}'
+    printf 'Selection (number or exact 4.MINOR.PATCH): '
+    read -r selection
+    if [[ "$selection" =~ ^[1-9][0-9]*$ ]]; then
+      OPENSHIFT_RELEASE=$(echo "$choices" | awk -v n="$selection" 'NR == n {print; exit}')
+    else
+      OPENSHIFT_RELEASE=$selection
+    fi
+  fi
+  [[ "$OPENSHIFT_RELEASE" =~ ^4\.[0-9]+\.[0-9]+$ ]] \
+    || err "OpenShift requires an exact version: --release 4.MINOR.PATCH"
+  log "Using Red Hat OpenShift $OPENSHIFT_RELEASE"
+  return
+fi
 if [ -n "$FLAG_RELEASE" ] && ! echo "$FLAG_RELEASE" | grep -Eq '^[0-9]+\.[0-9]+$'; then
   # full tag given verbatim, e.g. 4.16.0-okd-scos.1
   OPENSHIFT_RELEASE=$FLAG_RELEASE

@@ -6,6 +6,8 @@ OKD_MIRROR?=https://github.com/okd-project/okd/releases/download
 
 # fixed release version
 OPENSHIFT_RELEASE?=none
+DEPLOYMENT_TYPE?=okd
+OCP_MIRROR?=https://mirror.openshift.com/pub/openshift-v4/x86_64/clients/ocp
 
 # image name
 CONTAINER_NAME?=quay.io/slauger/hcloud-okd4
@@ -33,8 +35,15 @@ latest_version:
 # fetch
 .PHONY: fetch
 fetch:
+ifeq ($(DEPLOYMENT_TYPE),openshift)
+	curl -fL --retry 3 -o openshift-install-linux-$(OPENSHIFT_RELEASE).tar.gz $(OCP_MIRROR)/$(OPENSHIFT_RELEASE)/openshift-install-linux.tar.gz
+	curl -fL --retry 3 -o openshift-client-linux-$(OPENSHIFT_RELEASE).tar.gz $(OCP_MIRROR)/$(OPENSHIFT_RELEASE)/openshift-client-linux.tar.gz
+	curl -fL --retry 3 -o openshift-sha256sum-$(OPENSHIFT_RELEASE).txt $(OCP_MIRROR)/$(OPENSHIFT_RELEASE)/sha256sum.txt
+	@for kind in install client; do expected=$$(awk -v name="openshift-$$kind-linux.tar.gz" -v versioned="openshift-$$kind-linux-$(OPENSHIFT_RELEASE).tar.gz" '$$2 == name || $$2 == "*" name || $$2 == versioned || $$2 == "*" versioned {print $$1}' openshift-sha256sum-$(OPENSHIFT_RELEASE).txt); test -n "$$expected" || exit 1; printf '%s  %s\n' "$$expected" "openshift-$$kind-linux-$(OPENSHIFT_RELEASE).tar.gz" | shasum -a 256 -c - || exit 1; done
+else
 	wget -O openshift-install-linux-$(OPENSHIFT_RELEASE).tar.gz $(OKD_MIRROR)/$(OPENSHIFT_RELEASE)/openshift-install-linux-$(OPENSHIFT_RELEASE).tar.gz
 	wget -O openshift-client-linux-$(OPENSHIFT_RELEASE).tar.gz $(OKD_MIRROR)/$(OPENSHIFT_RELEASE)/openshift-client-linux-$(OPENSHIFT_RELEASE).tar.gz
+endif
 
 
 .PHONY: build
@@ -75,7 +84,7 @@ generate_ignition:
 .PHONY: hcloud_image
 hcloud_image:
 	@if [ -z "$(HCLOUD_TOKEN)" ]; then echo "ERROR: HCLOUD_TOKEN is not set"; exit 1; fi
-	(cd packer && packer build -var location=$(PACKER_LOCATION) -var server_type=$(PACKER_SERVER_TYPE) -var fcos_release=$(TF_VAR_fcos_release) -var fcos_url=$(shell openshift-install coreos print-stream-json | jq -r '.architectures.x86_64.artifacts.qemu.formats | (."qcow2.gz" // ."qcow2.xz").disk.location') hcloud-fcos.json)
+	(cd packer && packer build -var location=$(PACKER_LOCATION) -var server_type=$(PACKER_SERVER_TYPE) -var fcos_release=$(TF_VAR_fcos_release) -var fcos_url=$(shell openshift-install coreos print-stream-json | jq -r '(.architectures.x86_64.artifacts.qemu // .architectures.x86_64.artifacts.openstack).formats | (."qcow2.gz" // ."qcow2.xz").disk.location') hcloud-fcos.json)
 
 .PHONY: sign_csr
 sign_csr:

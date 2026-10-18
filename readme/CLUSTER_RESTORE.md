@@ -167,3 +167,13 @@ recovery process; do not attest to a node-disk-only recovery if they are require
 - Sanitized verification evidence:
   `logs/restore-verification-20261018T074537Z-28c39ba5.json`.
 - Jira tracking: pending Atlassian connection and project selection.
+
+### Primary IP missing during restore
+
+A Hetzner HTTP 404 for a saved `primary_ips/ID` means that required resource is
+not available to the configured project token. Local `ready` status records
+successful snapshot creation; it does not prove that every cloud dependency
+still exists. Check the original project and its retained Primary IPs. Both
+original IPv4 and IPv6 must remain available with the saved addresses. The
+existing restore flow cannot substitute new addresses merely by editing the
+manifest. Preserve disk snapshots and artifacts for recovery investigation.

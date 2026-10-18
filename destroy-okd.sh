@@ -12,30 +12,43 @@ cluster_dispatch destroy "$@"
 . "$REPO_ROOT/functions/lifecycle.sh"
 . "$REPO_ROOT/functions/progress.sh"
 . "$REPO_ROOT/functions/snapshots.sh"
+. "$REPO_ROOT/functions/destroy-menu.sh"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 err() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
+FLAG_DISTRIBUTION=""
 ASSUME_YES=0
+DESTROY_MODE_EXPLICIT=0
 SNAPSHOT_BEFORE_DESTROY=0
 [ ! -f .snapshot-before-destroy ] || SNAPSHOT_BEFORE_DESTROY=1
 while [ $# -gt 0 ]; do
   case "$1" in
+    --distribution) FLAG_DISTRIBUTION=${2:?--distribution needs okd or openshift}; shift 2 ;;
     --yes) ASSUME_YES=1; shift ;;
-    --snapshot-before-destroy) SNAPSHOT_BEFORE_DESTROY=1; shift ;;
-    --no-snapshot-before-destroy) SNAPSHOT_BEFORE_DESTROY=0; shift ;;
-    -h|--help) echo 'Usage: ./destroy-okd.sh [--cluster NAME] [--yes] [--snapshot-before-destroy | --no-snapshot-before-destroy]'; exit 0 ;;
+    --snapshot-before-destroy) DESTROY_MODE_EXPLICIT=1; SNAPSHOT_BEFORE_DESTROY=1; shift ;;
+    --no-snapshot-before-destroy) DESTROY_MODE_EXPLICIT=1; SNAPSHOT_BEFORE_DESTROY=0; shift ;;
+    -h|--help) echo 'Usage: ./destroy-okd.sh [--cluster NAME] [--distribution okd|openshift] [--yes] [--snapshot-before-destroy | --no-snapshot-before-destroy]'; exit 0 ;;
     *) err "unknown option: $1" ;;
   esac
 done
-start_progress_server
-progress_step destroy "Verifying cluster ownership" "<1 min"
 load_env
+case "${DEPLOYMENT_TYPE:-okd}" in okd|openshift) ;; *) err "invalid recorded distribution" ;; esac
+if [ -n "$FLAG_DISTRIBUTION" ]; then
+  [ "$FLAG_DISTRIBUTION" = "${DEPLOYMENT_TYPE:-okd}" ] || err "--distribution does not match the recorded cluster; refusing teardown"
+fi
 DOMAIN=${TF_VAR_dns_domain:?TF_VAR_dns_domain is required}
 export KUBECONFIG="$PWD/ignition/auth/kubeconfig"
+if [ "$ASSUME_YES" = 0 ] && [ "$DESTROY_MODE_EXPLICIT" = 0 ] && [ -t 0 ]; then
+  choose_destroy_action
+  [ "$DESTROY_ACTION" != cancel ] || exit 0
+fi
+start_progress_server
+progress_step destroy "Verifying cluster ownership" "<1 min"
 [ -s terraform/terraform.tfstate ] || err "local Terraform state is missing; refusing teardown"
 python3 "$REPO_ROOT/scripts/check_state.py" terraform/terraform.tfstate "$DOMAIN" "${CLUSTER_ID:-}"
 cluster_servers >/dev/null || err "could not verify live cluster ownership"
+configure_host_api
 
 # A manual run cancels a pending auto-destroy job. The scheduled run itself
 # (HCLOUD_OKD4_SCHEDULED=1, set in the launchd plist) must NOT do this —
@@ -96,6 +109,11 @@ else
   echo "This will PERMANENTLY DESTROY the cluster at $TF_VAR_dns_domain:"
   echo "  - all servers, the load balancer, network and firewalls"
   echo "  - all Cloudflare DNS records of the cluster"
+  if [ "$SNAPSHOT_BEFORE_DESTROY" = 1 ]; then
+    echo '  Recovery: snapshot first; retain original node Primary IPs and restore bundles.'
+  else
+    echo '  Recovery: NO new snapshot; existing images and saved sets are kept.'
+  fi
   printf '\nType "yes" to continue: '
   read -r CONFIRM
   [ "$CONFIRM" = "yes" ] || { echo "Aborted."; exit 0; }
