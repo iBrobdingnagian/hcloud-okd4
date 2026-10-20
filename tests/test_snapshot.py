@@ -271,6 +271,24 @@ touch deletion-started
         path.write_text(json.dumps(spec))
         return path, spec
 
+    def test_import_accepts_verified_lb_endpoint_but_rejects_other_addresses(self):
+        from cluster_access import refresh
+        path, spec = self.import_spec()
+        state_path = Path(spec['source_state'])
+        state = json.loads(state_path.read_text())
+        state['resources'].append({
+            'type': 'hcloud_load_balancer', 'mode': 'managed', 'instances': [
+                {'attributes': {'name': 'lb.' + self.domain, 'ipv4': '192.0.2.10',
+                                'labels': {'hcloud-okd4/cluster': 'dev'}}}]})
+        state_path.write_text(json.dumps(state))
+        (self.work / 'terraform/terraform.tfstate').write_text(json.dumps(state))
+        refresh(self.work, self.domain)
+        snapshots.review_import(self.work, path, self.cloud)
+        kubeconfig = self.work / 'ignition/auth/kubeconfig'
+        kubeconfig.write_text(kubeconfig.read_text().replace('192.0.2.10', '192.0.2.99'))
+        with self.assertRaisesRegex(snapshots.SnapshotError, 'does not select this cluster domain'):
+            snapshots.review_import(self.work, path, self.cloud)
+
     def test_unlabelled_existing_images_can_be_reviewed_imported_and_restored_without_cloud_writes(self):
         path, spec = self.import_spec()
         manifest, _, _ = snapshots.review_import(self.work, path, self.cloud)

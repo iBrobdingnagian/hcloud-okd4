@@ -121,14 +121,25 @@ recovery process; do not attest to a node-disk-only recovery if they are require
   outdated Terraform sources. Restore mode must skip that image lookup.
 - DNS caches can retain the old load balancer address until TTL expiry. Check
   authoritative Cloudflare records as well as the local resolver.
-- The restore health checks connect to the Terraform-managed load balancer IP
-  with `--tls-server-name=api.DOMAIN`. This preserves certificate validation and
-  avoids a workstation resolver's cached NXDOMAIN. The original kubeconfig is
-  unchanged. For a temporary manual check while local DNS recovers:
+- After Terraform completes, restore updates the workspace's
+  `ignition/auth/kubeconfig` to the current managed load balancer IP and sets
+  `tls-server-name: api.DOMAIN`. CA trust, credentials, and contexts are preserved.
+  This makes normal `oc`/`kubectl` commands independent of cached NXDOMAIN or an
+  old load balancer address. Snapshot archives and cluster DNS names are unchanged.
+  Each restore refreshes the IP, including when restoring a snapshot whose
+  kubeconfig already points at a previous load balancer.
+- Restore health checks use that same kubeconfig without endpoint overrides.
+  Export the path printed on completion; copies elsewhere must be refreshed or
+  replaced with this file. For a cluster restored before this fix, repair access
+  without redeploying (run from the repository root):
 
   ```bash
-  oc --server=https://LOAD_BALANCER_IP:6443 --tls-server-name=api.DOMAIN get nodes
+  python3 scripts/cluster_access.py refresh .work/CLUSTER DOMAIN
+  export KUBECONFIG="$PWD/.work/CLUSTER/ignition/auth/kubeconfig"
+  oc get nodes
   ```
+- Browser console access still uses DNS; the kubeconfig change does not flush
+  workstation or upstream DNS caches.
 - The load balancer can receive a new public address; original node IPs are
   retained. Cloudflare records managed by this repository are recreated.
 - Manual changes outside Terraform are not automatically reproduced.

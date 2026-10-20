@@ -350,11 +350,14 @@ def review_import(work, spec_path, cloud):
             raise SnapshotError('Matching original installation artifacts are missing: ' + filename)
     import yaml
     kube = yaml.safe_load((artifacts / 'ignition/auth/kubeconfig').read_text())
-    contexts = {c['name']: c['context']['cluster'] for c in kube.get('contexts', [])}
-    active = contexts.get(kube.get('current-context'))
-    endpoints = [c['cluster'].get('server') for c in kube.get('clusters', []) if c['name'] == active]
-    if endpoints != ['https://api.' + domain + ':6443']:
-        raise SnapshotError('Original kubeconfig does not select this cluster domain')
+    from cluster_access import load_balancer_ip, selected_cluster, validate_identity
+    try:
+        endpoint = selected_cluster(kube).get('server')
+        address = (None if endpoint == 'https://api.' + domain + ':6443'
+                   else load_balancer_ip(state, domain))
+        validate_identity(kube, domain, address)
+    except ValueError as exc:
+        raise SnapshotError('Original kubeconfig does not select this cluster domain') from exc
     from validate_ignition import validate
     for role in ('master', 'worker'):
         validate(artifacts / f'ignition/{role}.ign')

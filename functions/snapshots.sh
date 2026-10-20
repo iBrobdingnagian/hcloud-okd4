@@ -45,31 +45,21 @@ restore_cluster_snapshot() {
   progress_step deploy "Restoring cluster snapshots" "5-15 min"
   # Infrastructure only: no installer, Packer, Ansible or ignition regeneration.
   tb "make infrastructure MODE='apply -auto-approve' BOOTSTRAP=false"
-  # A local resolver may cache NXDOMAIN from the period after teardown. Use the
-  # managed LB address for checks while retaining normal hostname verification.
-  # The saved user kubeconfig and cluster's DNS names are never rewritten.
-  local lb_ip
-  lb_ip=$(python3 - "$DOMAIN" <<'PY'
-import ipaddress, json, sys
-from pathlib import Path
-state = json.loads(Path('terraform/terraform.tfstate').read_text())
-addresses = [i['attributes']['ipv4'] for r in state['resources']
-             if r.get('mode') != 'data' and r['type'] == 'hcloud_load_balancer'
-             for i in r.get('instances', [])
-             if i['attributes'].get('name') == 'lb.' + sys.argv[1]]
-if len(addresses) != 1:
-    raise SystemExit('Cannot identify the restored cluster load balancer')
-print(ipaddress.IPv4Address(addresses[0]))
-PY
-  ) || return 1
-  local -a health_oc=(oc --request-timeout=15s "--server=https://$lb_ip:6443" "--tls-server-name=api.$DOMAIN")
+  # Repair the actual user kubeconfig, including an old LB IP saved in a snapshot.
+  # Keep the original CA/credentials and verify the cluster's DNS name over TLS.
+  python3 "$REPO_ROOT/scripts/cluster_access.py" refresh "$PWD" "$DOMAIN" \
+    || err "could not configure restored CLI access"
+  configure_host_api
+  # Bypass the shell oc wrapper: success must prove the user's kubeconfig works
+  # without private --server overrides or a functioning workstation DNS cache.
+  local -a health_oc=(command oc --request-timeout=15s)
   log "Waiting for the restored API, nodes and operators (up to 30 minutes)"
   local ready=0 deadline=$((SECONDS + 1800))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if "${health_oc[@]}" get --raw=/readyz >/dev/null 2>&1 \
       && "${health_oc[@]}" get nodes -o json | jq -e \
         --argjson total "$((TF_VAR_replicas_master + TF_VAR_replicas_worker))" \
-        '.items | length == $total and all(.[]; any(.status.conditions[]; .type == "Ready" and .status == "True"))' >/dev/null 2>&1 \
+        '.items | (length == $total) and all(.[]; any(.status.conditions[]; .type == "Ready" and .status == "True"))' >/dev/null 2>&1 \
       && "${health_oc[@]}" get clusteroperators -o json | jq -e \
         '.items | length > 0 and all(.[];
           any(.status.conditions[]; .type == "Available" and .status == "True") and
@@ -90,5 +80,6 @@ PY
   DUR=${FLAG_DURATION:-${LAB_DURATION:-8}}
   schedule_autodestroy
   log "Snapshot $FLAG_RESTORE_SNAPSHOT restored successfully"
+  printf 'CLI: export KUBECONFIG="%s"\n     oc get nodes\n' "$KUBECONFIG"
   printf 'Console: https://console-openshift-console.apps.%s\n%s\n' "$DOMAIN" "$AUTODESTROY_NOTE"
 }

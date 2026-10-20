@@ -148,6 +148,7 @@ assert_cluster_context() {
   local server
   server=$(oc config view --minify -o jsonpath='{.clusters[0].cluster.server}') || return 1
   [ "$server" = "https://api.$DOMAIN:6443" ] \
+    || python3 "$REPO_ROOT/scripts/cluster_access.py" validate "$PWD" "$DOMAIN" --kubeconfig "$kubeconfig" \
     || { echo "Kubeconfig does not belong to $DOMAIN; refusing operation" >&2; return 1; }
 }
 
